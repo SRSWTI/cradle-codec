@@ -46,7 +46,7 @@ def quantize_uint8_minmax(values: np.ndarray, *, axis: str = "channel") -> tuple
     return np.ascontiguousarray(quantized), metadata
 
 
-def _restore_shape(values_shape: tuple[int, ...], metadata_values: np.ndarray, axis: str) -> tuple[int, ...]:
+def _restore_shape(values_shape: tuple[int, ...], axis: str) -> tuple[int, ...]:
     if axis == "part":
         return (1,) * len(values_shape)
     if axis == "frame":
@@ -63,11 +63,9 @@ def dequantize_uint8_minmax(values: np.ndarray, metadata: QuantizationMetadata) 
         raise ValueError(f"expected uint8_minmax metadata, got {metadata.mode!r}")
     if metadata.min_values is None or metadata.scales is None:
         raise ValueError("uint8_minmax metadata requires min_values and scales")
-    min_values = np.asarray(metadata.min_values, dtype=np.float32).reshape(
-        _restore_shape(values.shape, np.asarray(metadata.min_values), metadata.axis)
-    )
-    scales = np.asarray(metadata.scales, dtype=np.float32).reshape(
-        _restore_shape(values.shape, np.asarray(metadata.scales), metadata.axis)
-    )
+    min_values = np.asarray(metadata.min_values, dtype=np.float32)
+    scales = np.asarray(metadata.scales, dtype=np.float32)
+    min_values = min_values.reshape(_restore_shape(values.shape, metadata.axis))
+    scales = scales.reshape(_restore_shape(values.shape, metadata.axis))
     reconstructed = values.astype(np.float32) * scales + min_values
     return reconstructed.astype(np.dtype(metadata.source_dtype), copy=False)
