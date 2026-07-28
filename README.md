@@ -173,6 +173,12 @@ we believe the next generation of inference systems will treat reusable state as
 
 see [architecture](docs/architecture.md), [usage](docs/usage.md), [verification](docs/verification.md), and the [roadmap](docs/roadmap.md).
 
+## inspiration and distinction
+
+we thank ceyu xu, yongji wu, xinyu yang, boyuan chen, matthew lentz, danyang zhuo, and lisa w. wills, whose work, [llm.265: video codecs are secretly tensor codecs](https://doi.org/10.1145/3725843.3756078), was one of our inspirations. it strengthened the broader case for applying video codecs to tensors, but it did not provide the systems path we needed for real inference stacks: artifact storage, network transport, cache lookup, request-lifecycle integration, failure handling, and restoration into serving memory.
+
+our core direction was developed independently: nccl-like infrastructure for streaming live inference state over ethernet, with codec compression and storage integrated into online serving. cradle codec is not only a tensor-compression experiment; it is an attempt to move reusable kv state through real networks and production inference runtimes.
+
 ## license
 
 apache-2.0.
