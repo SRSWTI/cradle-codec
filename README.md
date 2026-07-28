@@ -117,6 +117,19 @@ uv sync --extra gstreamer --group dev
 uv run cradle-codec gstreamer loopback
 ```
 
+to build the bundled gstreamer development tree, first install a c/c++ toolchain, `pkg-config`, and the native prerequisites for pygobject. cradle codec's python gstreamer integration requires pygobject as well, so install the `gstreamer` extra before building:
+
+```bash
+uv sync --extra gstreamer --group dev
+cd src/cradle_codec/helpers/gstreamer
+./setup_and_build.sh
+uv run meson devenv -C builddir
+```
+
+the setup script creates the documentation metadata required by the source tree, configures a clean `builddir` with documentation disabled, and compiles gstreamer. the final command opens a development shell with the newly built libraries, plugins, and tools on the correct paths.
+
+all bundled dependency definitions, upstream build documentation, and the material needed to configure gstreamer and `appsink` are kept under `src/cradle_codec/helpers/gstreamer`. start with the [bundled gstreamer readme](src/cradle_codec/helpers/gstreamer/README.md), then use the [gstapp documentation](src/cradle_codec/helpers/gstreamer/subprojects/gst-plugins-base/docs/libs/app/index.md) and [appsrc/appsink examples](src/cradle_codec/helpers/gstreamer/subprojects/gst-plugins-base/tests/examples/app/) for application-owned pipelines.
+
 inspect the full workflows in [usage](docs/usage.md) and [verification](docs/verification.md).
 
 ## current boundary
