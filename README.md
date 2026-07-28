@@ -192,6 +192,8 @@ we thank ceyu xu, yongji wu, xinyu yang, boyuan chen, matthew lentz, danyang zhu
 
 our core direction was developed independently: nccl-like infrastructure for streaming live inference state over ethernet, with codec compression and storage integrated into online serving. cradle codec is not only a tensor-compression experiment; it is an attempt to move reusable kv state through real networks and production inference runtimes.
 
+we also thank the [gstreamer team](https://gstreamer.freedesktop.org/) for their exceptional work on a composable, production-grade media framework. cradle codec builds on that engineering through `appsrc`, `appsink`, gdp framing, tcp transport elements, development environments, and hardware-codec integration. their work turns difficult media and transport plumbing into dependable systems building blocks.
+
 ## license
 
 apache-2.0.
