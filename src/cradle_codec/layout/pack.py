@@ -84,7 +84,7 @@ def pack_kv_to_frame_batches(kv: np.ndarray, layout: KVCodecLayout) -> list[Pack
                         token_count=shape.num_tokens,
                         geometry=geometry,
                     ),
-                    frames=np.ascontiguousarray(frames),
+                    frames=frames,
                 )
             )
     return batches
