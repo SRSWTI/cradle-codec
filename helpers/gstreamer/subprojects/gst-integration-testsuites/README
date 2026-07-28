@@ -1,0 +1,11 @@
+This is the official GStreamer integration testsuites repository.
+
+It contains test files (`.validatetest` files in `testsuites/`) and media assets
+(in `media/`, a separate git submodule using [git-lfs]) used by
+[gst-validate-launcher](https://gstreamer.freedesktop.org/documentation/gst-devtools/gst-validate-launcher.html).
+
+For documentation on how to write `.validatetest` files and how to add new tests
+or media files, see the
+[validate test file documentation](https://gstreamer.freedesktop.org/documentation/gst-devtools/gst-validate-test-file.html).
+
+[git-lfs]: https://git-lfs.github.com/

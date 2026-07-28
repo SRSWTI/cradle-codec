@@ -1,0 +1,1902 @@
+/* GStreamer Wayland Library
+ *
+ * Copyright (C) 2011 Intel Corporation
+ * Copyright (C) 2011 Sreerenj Balachandran <sreerenj.balachandran@intel.com>
+ * Copyright (C) 2014 Collabora Ltd.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Library General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Library General Public License for more details.
+ *
+ * You should have received a copy of the GNU Library General Public
+ * License along with this library; if not, write to the Free
+ * Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+ * Boston, MA 02110-1301 USA.
+ */
+
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
+#include "gstwlwindow.h"
+#include "gstwlbuffer.h"
+#include "gstwllinuxdmabuf.h"
+#include "gstwlshmallocator.h"
+#include "gstwlvideobufferpool.h"
+
+#include <gst/allocators/allocators.h>
+#include <gst/video/gstvideodmabufpool.h>
+
+#include "color-management-v1-client-protocol.h"
+#include "color-representation-v1-client-protocol.h"
+#include "fullscreen-shell-unstable-v1-client-protocol.h"
+#include "single-pixel-buffer-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
+#include "xdg-shell-client-protocol.h"
+
+#define GST_CAT_DEFAULT gst_wl_window_debug
+GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
+
+typedef struct _GstWlWindowPrivate
+{
+  GObject parent_instance;
+
+  GMutex *render_lock;
+
+  GstWlDisplay *display;
+  struct wl_surface *area_surface;
+  struct wl_surface *area_surface_wrapper;
+  GstWlBuffer *area_surface_buffer;
+  struct wl_subsurface *area_subsurface;
+  struct wp_viewport *area_viewport;
+  struct wl_surface *video_surface;
+  struct wl_surface *video_surface_wrapper;
+  struct wl_subsurface *video_subsurface;
+  struct wp_viewport *video_viewport;
+  struct xdg_surface *xdg_surface;
+  struct xdg_toplevel *xdg_toplevel;
+  struct wp_color_management_surface_v1 *color_management_surface;
+  struct wp_color_representation_surface_v1 *color_representation_surface;
+  gboolean configured;
+  GCond configure_cond;
+  GMutex configure_mutex;
+
+  /* the size and position of the area_(sub)surface */
+  GstVideoRectangle render_rectangle;
+
+  /* the size and position of the video_subsurface */
+  GstVideoRectangle video_rectangle;
+
+  /* the size of the video in the buffers (unpadded) */
+  gint video_width, video_height;
+
+  /* the size of the video in the buffers (padded) */
+  gint buffer_width, buffer_height;
+
+  /* default window dimension used when the compositor does not chose a size */
+  gint default_width, default_height;
+
+  /* video width scaled according to par */
+  gint scaled_width;
+
+  /* the crop rectangle */
+  GstVideoRectangle crop;
+
+  enum wl_output_transform buffer_transform;
+
+  gboolean force_aspect_ratio;
+
+  /* when this is not set both the area_surface and the video_surface are not
+   * visible and certain steps should be skipped */
+  gboolean is_area_surface_mapped;
+
+  GMutex window_lock;
+
+  /* Video information for the next render */
+  GstVideoInfo src_video_info;
+  GstVideoInfoDmaDrm src_drm_info;
+  GstVideoMasteringDisplayInfo src_minfo;
+  GstVideoContentLightLevel src_linfo;
+  GstCaps *src_caps;
+  gchar *drm_device;
+  GstBufferPool *pool;
+  gboolean skip_dumb_buffer_copy;
+  gboolean src_info_changed;
+
+  GstWlBuffer *next_buffer;
+  GstWlBuffer *staged_buffer;
+  GstWlBuffer *last_rendered;
+  gboolean clear_window;
+  struct wl_callback *frame_callback;
+  struct wl_callback *commit_callback;
+
+  /* wl_buffer cache */
+  GMutex buffers_mutex;
+  GHashTable *buffers;
+  gboolean shutting_down;
+} GstWlWindowPrivate;
+
+G_DEFINE_TYPE_WITH_CODE (GstWlWindow, gst_wl_window, GST_TYPE_OBJECT,
+    G_ADD_PRIVATE (GstWlWindow)
+    GST_DEBUG_CATEGORY_INIT (gst_wl_window_debug,
+        "wlwindow", 0, "wlwindow library");
+    );
+
+enum
+{
+  CLOSED,
+  MAP,
+  LAST_SIGNAL
+};
+
+static guint signals[LAST_SIGNAL] = { 0 };
+
+static void gst_wl_window_finalize (GObject * gobject);
+
+static void gst_wl_window_update_geometry (GstWlWindow * self);
+
+static void gst_wl_window_update_borders (GstWlWindow * self);
+
+static void gst_wl_window_commit_buffer (GstWlWindow * self,
+    GstWlBuffer * buffer, gboolean redraw);
+
+static void gst_wl_window_set_colorimetry (GstWlWindow * self,
+    const GstVideoColorimetry * colorimetry,
+    const GstVideoMasteringDisplayInfo * minfo,
+    const GstVideoContentLightLevel * linfo);
+
+static void
+handle_xdg_toplevel_close (void *data, struct xdg_toplevel *xdg_toplevel)
+{
+  GstWlWindow *self = data;
+
+  GST_DEBUG_OBJECT (self, "XDG toplevel got a \"close\" event.");
+  g_signal_emit (self, signals[CLOSED], 0);
+}
+
+static void
+handle_xdg_toplevel_configure (void *data, struct xdg_toplevel *xdg_toplevel,
+    int32_t width, int32_t height, struct wl_array *states)
+{
+  GstWlWindow *self = data;
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  const uint32_t *state;
+
+  GST_DEBUG_OBJECT (self, "XDG toplevel got a \"configure\" event, [ %d, %d ].",
+      width, height);
+
+  wl_array_for_each (state, states) {
+    switch (*state) {
+      case XDG_TOPLEVEL_STATE_FULLSCREEN:
+        GST_DEBUG_OBJECT (self, "XDG top-level now FULLSCREEN");
+        break;
+      case XDG_TOPLEVEL_STATE_MAXIMIZED:
+        GST_DEBUG_OBJECT (self, "XDG top-level now MAXIMIXED");
+        break;
+      case XDG_TOPLEVEL_STATE_RESIZING:
+        GST_DEBUG_OBJECT (self, "XDG top-level being RESIZED");
+        break;
+      case XDG_TOPLEVEL_STATE_ACTIVATED:
+        GST_DEBUG_OBJECT (self, "XDG top-level being ACTIVATED");
+        break;
+    }
+  }
+
+  if (width <= 0 || height <= 0) {
+    width = priv->default_width;
+    height = priv->default_height;
+  }
+
+  g_mutex_lock (&priv->configure_mutex);
+  priv->configured = FALSE;
+  gst_wl_window_set_render_rectangle (self, 0, 0, width, height);
+  g_mutex_unlock (&priv->configure_mutex);
+}
+
+static const struct xdg_toplevel_listener xdg_toplevel_listener = {
+  handle_xdg_toplevel_configure,
+  handle_xdg_toplevel_close,
+};
+
+static void
+handle_xdg_surface_configure (void *data, struct xdg_surface *xdg_surface,
+    uint32_t serial)
+{
+  GstWlWindow *self = data;
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  xdg_surface_ack_configure (xdg_surface, serial);
+
+  g_mutex_lock (&priv->configure_mutex);
+  priv->configured = TRUE;
+  g_cond_signal (&priv->configure_cond);
+  gst_wl_window_update_geometry (self);
+  g_mutex_unlock (&priv->configure_mutex);
+}
+
+static const struct xdg_surface_listener xdg_surface_listener = {
+  handle_xdg_surface_configure,
+};
+
+static void
+gst_wl_window_class_init (GstWlWindowClass * klass)
+{
+  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+  gobject_class->finalize = gst_wl_window_finalize;
+
+  signals[CLOSED] = g_signal_new ("closed", G_TYPE_FROM_CLASS (gobject_class),
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[MAP] = g_signal_new ("map", G_TYPE_FROM_CLASS (gobject_class),
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+
+}
+
+static void
+gst_wl_window_init (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  priv->configured = TRUE;
+  g_cond_init (&priv->configure_cond);
+  g_mutex_init (&priv->configure_mutex);
+  g_mutex_init (&priv->window_lock);
+  priv->buffers = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL,
+      (GDestroyNotify) gst_object_unref);
+  g_mutex_init (&priv->buffers_mutex);
+}
+
+static void
+gstmemory_disposed (GstWlWindow * self, gpointer gstmem)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GstWlBuffer *wlbuffer;
+
+  GST_DEBUG_OBJECT (self, "Uncaching disposed GstMemory %p.", gstmem);
+
+  g_mutex_lock (&priv->buffers_mutex);
+  wlbuffer = g_hash_table_lookup (priv->buffers, gstmem);
+  g_hash_table_steal (priv->buffers, gstmem);
+  g_mutex_unlock (&priv->buffers_mutex);
+
+  gst_clear_object (&wlbuffer);
+}
+
+static void
+gst_wl_buffer_weak_unref (gpointer key, gpointer value, gpointer user_data)
+{
+  gst_mini_object_weak_unref (GST_MINI_OBJECT (key),
+      (GstMiniObjectNotify) gstmemory_disposed, user_data);
+}
+
+static void
+gst_wl_window_finalize (GObject * gobject)
+{
+  GstWlWindow *self = GST_WL_WINDOW (gobject);
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  gst_wl_display_callback_destroy (priv->display, &priv->frame_callback);
+  gst_wl_display_callback_destroy (priv->display, &priv->commit_callback);
+  gst_wl_display_object_destroy (priv->display,
+      (gpointer *) & priv->xdg_toplevel, (GDestroyNotify) xdg_toplevel_destroy);
+  gst_wl_display_object_destroy (priv->display,
+      (gpointer *) & priv->xdg_surface, (GDestroyNotify) xdg_surface_destroy);
+
+  /* to avoid buffers being unregistered from another thread
+   * at the same time */
+  g_mutex_lock (&priv->buffers_mutex);
+  priv->shutting_down = TRUE;
+  g_hash_table_foreach (priv->buffers, (GHFunc) gst_wl_buffer_weak_unref, self);
+  g_mutex_unlock (&priv->buffers_mutex);
+
+  g_hash_table_remove_all (priv->buffers);
+  g_hash_table_unref (priv->buffers);
+  g_mutex_clear (&priv->buffers_mutex);
+
+  if (priv->pool) {
+    gst_buffer_pool_set_active (priv->pool, FALSE);
+    gst_clear_object (&priv->pool);
+  }
+  gst_clear_caps (&priv->src_caps);
+  g_free (priv->drm_device);
+
+  g_cond_clear (&priv->configure_cond);
+  g_mutex_clear (&priv->configure_mutex);
+  g_mutex_clear (&priv->window_lock);
+
+  if (priv->video_viewport)
+    wp_viewport_destroy (priv->video_viewport);
+
+  if (priv->color_management_surface)
+    wp_color_management_surface_v1_destroy (priv->color_management_surface);
+
+  if (priv->color_representation_surface)
+    wp_color_representation_surface_v1_destroy
+        (priv->color_representation_surface);
+
+  wl_proxy_wrapper_destroy (priv->video_surface_wrapper);
+  wl_subsurface_destroy (priv->video_subsurface);
+  wl_surface_destroy (priv->video_surface);
+
+  if (priv->area_subsurface)
+    wl_subsurface_destroy (priv->area_subsurface);
+
+  if (priv->area_viewport)
+    wp_viewport_destroy (priv->area_viewport);
+
+  wl_proxy_wrapper_destroy (priv->area_surface_wrapper);
+  g_clear_object (&priv->area_surface_buffer);
+  wl_surface_destroy (priv->area_surface);
+
+  g_clear_object (&priv->display);
+
+  G_OBJECT_CLASS (gst_wl_window_parent_class)->finalize (gobject);
+}
+
+static GstWlWindow *
+gst_wl_window_new_internal (GstWlDisplay * display, GMutex * render_lock)
+{
+  GstWlWindow *self;
+  GstWlWindowPrivate *priv;
+  struct wl_compositor *compositor;
+  struct wl_event_queue *event_queue;
+  struct wl_region *region;
+  struct wp_viewporter *viewporter;
+
+  self = g_object_new (GST_TYPE_WL_WINDOW, NULL);
+  priv = gst_wl_window_get_instance_private (self);
+  priv->display = g_object_ref (display);
+  priv->render_lock = render_lock;
+  g_cond_init (&priv->configure_cond);
+  priv->force_aspect_ratio = TRUE;
+
+  compositor = gst_wl_display_get_compositor (display);
+  priv->area_surface = wl_compositor_create_surface (compositor);
+  priv->video_surface = wl_compositor_create_surface (compositor);
+
+  priv->area_surface_wrapper = wl_proxy_create_wrapper (priv->area_surface);
+  priv->video_surface_wrapper = wl_proxy_create_wrapper (priv->video_surface);
+
+  event_queue = gst_wl_display_get_event_queue (display);
+  wl_proxy_set_queue ((struct wl_proxy *) priv->area_surface_wrapper,
+      event_queue);
+  wl_proxy_set_queue ((struct wl_proxy *) priv->video_surface_wrapper,
+      event_queue);
+
+  /* embed video_surface in area_surface */
+  priv->video_subsurface =
+      wl_subcompositor_get_subsurface (gst_wl_display_get_subcompositor
+      (display), priv->video_surface, priv->area_surface);
+  wl_subsurface_set_desync (priv->video_subsurface);
+
+  viewporter = gst_wl_display_get_viewporter (display);
+  if (viewporter) {
+    priv->area_viewport = wp_viewporter_get_viewport (viewporter,
+        priv->area_surface);
+    priv->video_viewport = wp_viewporter_get_viewport (viewporter,
+        priv->video_surface);
+  }
+
+  /* never accept input events on the video surface */
+  region = wl_compositor_create_region (compositor);
+  wl_surface_set_input_region (priv->video_surface, region);
+  wl_region_destroy (region);
+
+  return self;
+}
+
+/**
+ * gst_wl_window_ensure_fullscreen_for_output:
+ * @self: A #GstWlWindow
+ * @fullscreen: %TRUE to set fullscreen, %FALSE to unset it
+ * @output_nane: (nullable): The name of the wl_output to fullscreen to
+ *
+ * Ensure the window fullscreen state matches the desired state. If a
+ * output_name is provided, and this output exists, the window will be set to
+ * fullscreen on that screen. Otherwise the compisitor will decide.
+ *
+ * Since: 1.28
+ */
+void
+gst_wl_window_ensure_fullscreen_for_output (GstWlWindow * self,
+    gboolean fullscreen, const gchar * output_name)
+{
+  GstWlWindowPrivate *priv;
+  GstWlOutput *output = NULL;
+  struct wl_output *wl_output = NULL;
+
+  g_return_if_fail (self);
+  priv = gst_wl_window_get_instance_private (self);
+
+  if (!fullscreen) {
+    xdg_toplevel_unset_fullscreen (priv->xdg_toplevel);
+    wl_display_flush (gst_wl_display_get_display (priv->display));
+    return;
+  }
+
+  if (output_name) {
+    output = gst_wl_display_get_output_by_name (priv->display, output_name);
+    if (output)
+      wl_output = gst_wl_output_get_wl_output (output);
+    else
+      GST_WARNING ("Could not find any output named '%s'", output_name);
+  }
+
+  xdg_toplevel_set_fullscreen (priv->xdg_toplevel, wl_output);
+  wl_display_flush (gst_wl_display_get_display (priv->display));
+
+  // Unref last for thread safety
+  if (output)
+    g_object_unref (output);
+}
+
+/**
+ * gst_wl_window_ensure_fullscreen:
+ * @self: A #GstWlWindow
+ * @fullscreen: %TRUE to set fullscreen, %FALSE to unset it
+ *
+ * Same as gst_wl_window_ensure_fullscreen_for_output() without specifying an
+ * output.
+ */
+void
+gst_wl_window_ensure_fullscreen (GstWlWindow * self, gboolean fullscreen)
+{
+  gst_wl_window_ensure_fullscreen_for_output (self, fullscreen, NULL);
+}
+
+GstWlWindow *
+gst_wl_window_new_toplevel_full (GstWlDisplay * display,
+    const GstVideoInfo * info, gboolean fullscreen, const gchar * output_name,
+    GMutex * render_lock)
+{
+  GstWlWindow *self;
+  GstWlWindowPrivate *priv;
+  struct xdg_wm_base *xdg_wm_base;
+  struct zwp_fullscreen_shell_v1 *fullscreen_shell;
+
+  self = gst_wl_window_new_internal (display, render_lock);
+  priv = gst_wl_window_get_instance_private (self);
+
+  xdg_wm_base = gst_wl_display_get_xdg_wm_base (display);
+  fullscreen_shell = gst_wl_display_get_fullscreen_shell_v1 (display);
+
+  /* Check which protocol we will use (in order of preference) */
+  if (xdg_wm_base) {
+    gint64 timeout;
+
+    /* First create the XDG surface */
+    priv->xdg_surface = xdg_wm_base_get_xdg_surface (xdg_wm_base,
+        priv->area_surface);
+    if (!priv->xdg_surface) {
+      GST_ERROR_OBJECT (self, "Unable to get xdg_surface");
+      goto error;
+    }
+    xdg_surface_add_listener (priv->xdg_surface, &xdg_surface_listener, self);
+
+    /* Then the toplevel */
+    priv->xdg_toplevel = xdg_surface_get_toplevel (priv->xdg_surface);
+    if (!priv->xdg_toplevel) {
+      GST_ERROR_OBJECT (self, "Unable to get xdg_toplevel");
+      goto error;
+    }
+    xdg_toplevel_add_listener (priv->xdg_toplevel,
+        &xdg_toplevel_listener, self);
+    if (g_get_prgname ()) {
+      xdg_toplevel_set_app_id (priv->xdg_toplevel, g_get_prgname ());
+    } else {
+      xdg_toplevel_set_app_id (priv->xdg_toplevel, "org.gstreamer.wayland");
+    }
+
+    gst_wl_window_ensure_fullscreen_for_output (self, fullscreen, output_name);
+
+    /* Finally, commit the xdg_surface state as toplevel */
+    priv->configured = FALSE;
+
+    /* set the initial size to be the same as the reported video size */
+    priv->default_width =
+        gst_util_uint64_scale_int_round (info->width, info->par_n, info->par_d);
+    priv->default_height = info->height;
+    gst_wl_window_set_render_rectangle (self, 0, 0, priv->default_width,
+        priv->default_height);
+
+    GST_INFO_OBJECT (self, "Configured default rectangle to %ix%i",
+        priv->default_width, priv->default_height);
+
+    wl_surface_commit (priv->area_surface);
+    wl_display_flush (gst_wl_display_get_display (display));
+
+    g_mutex_lock (&priv->configure_mutex);
+    timeout = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+    while (!priv->configured) {
+      if (!g_cond_wait_until (&priv->configure_cond, &priv->configure_mutex,
+              timeout)) {
+        GST_WARNING_OBJECT (self,
+            "The compositor did not send configure event.");
+        break;
+      }
+    }
+    g_mutex_unlock (&priv->configure_mutex);
+  } else if (fullscreen_shell) {
+    GstWlOutput *output = NULL;
+    struct wl_output *wl_output = NULL;
+    if (output_name) {
+      output = gst_wl_display_get_output_by_name (priv->display, output_name);
+      wl_output = gst_wl_output_get_wl_output (output);
+    }
+
+    zwp_fullscreen_shell_v1_present_surface (fullscreen_shell,
+        priv->area_surface, ZWP_FULLSCREEN_SHELL_V1_PRESENT_METHOD_ZOOM,
+        wl_output);
+
+    if (output)
+      gst_object_unref (output);
+  } else {
+    GST_ERROR_OBJECT (self,
+        "Unable to use either xdg_wm_base or zwp_fullscreen_shell.");
+    goto error;
+  }
+
+
+  return self;
+
+error:
+  g_object_unref (self);
+  return NULL;
+}
+
+GstWlWindow *
+gst_wl_window_new_toplevel (GstWlDisplay * display, const GstVideoInfo * info,
+    gboolean fullscreen, GMutex * render_lock)
+{
+  return gst_wl_window_new_toplevel_full (display, info, fullscreen, NULL,
+      render_lock);
+}
+
+GstWlWindow *
+gst_wl_window_new_in_surface (GstWlDisplay * display,
+    struct wl_surface *parent, GMutex * render_lock)
+{
+  GstWlWindow *self;
+  GstWlWindowPrivate *priv;
+  struct wl_region *region;
+
+  self = gst_wl_window_new_internal (display, render_lock);
+  priv = gst_wl_window_get_instance_private (self);
+
+  /* do not accept input events on the area surface when embedded */
+  region =
+      wl_compositor_create_region (gst_wl_display_get_compositor (display));
+  wl_surface_set_input_region (priv->area_surface, region);
+  wl_region_destroy (region);
+
+  /* embed in parent */
+  priv->area_subsurface =
+      wl_subcompositor_get_subsurface (gst_wl_display_get_subcompositor
+      (display), priv->area_surface, parent);
+  wl_subsurface_set_desync (priv->area_subsurface);
+
+  wl_surface_commit (parent);
+
+  return self;
+}
+
+GstWlDisplay *
+gst_wl_window_get_display (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv;
+
+  g_return_val_if_fail (self != NULL, NULL);
+
+  priv = gst_wl_window_get_instance_private (self);
+  return g_object_ref (priv->display);
+}
+
+struct wl_surface *
+gst_wl_window_get_wl_surface (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv;
+
+  g_return_val_if_fail (self != NULL, NULL);
+
+  priv = gst_wl_window_get_instance_private (self);
+  return priv->video_surface_wrapper;
+}
+
+struct wl_subsurface *
+gst_wl_window_get_subsurface (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv;
+
+  g_return_val_if_fail (self != NULL, NULL);
+
+  priv = gst_wl_window_get_instance_private (self);
+  return priv->area_subsurface;
+}
+
+gboolean
+gst_wl_window_is_toplevel (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv;
+
+  g_return_val_if_fail (self != NULL, FALSE);
+
+  priv = gst_wl_window_get_instance_private (self);
+  return (priv->xdg_toplevel != NULL);
+}
+
+static void
+gst_wl_window_resize_video_surface (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GstVideoRectangle src = { 0, };
+  GstVideoRectangle wp_src = { 0, };
+  GstVideoRectangle dst = { 0, };
+  GstVideoRectangle res;
+
+  /* viewport coordinates will be based on the trasnformed surface */
+  wl_surface_set_buffer_transform (priv->video_surface_wrapper,
+      priv->buffer_transform);
+
+  /* adjust the width/height base on the rotation */
+  switch (priv->buffer_transform) {
+    case WL_OUTPUT_TRANSFORM_NORMAL:
+    case WL_OUTPUT_TRANSFORM_180:
+    case WL_OUTPUT_TRANSFORM_FLIPPED:
+    case WL_OUTPUT_TRANSFORM_FLIPPED_180:
+      src.w = priv->scaled_width;
+      src.h = priv->video_height;
+      wp_src.w = priv->crop.w;
+      wp_src.h = priv->crop.h;
+      break;
+    case WL_OUTPUT_TRANSFORM_90:
+    case WL_OUTPUT_TRANSFORM_270:
+    case WL_OUTPUT_TRANSFORM_FLIPPED_90:
+    case WL_OUTPUT_TRANSFORM_FLIPPED_270:
+      src.w = priv->video_height;
+      src.h = priv->scaled_width;
+      wp_src.w = priv->crop.h;
+      wp_src.h = priv->crop.w;
+      break;
+    default:
+      g_assert_not_reached ();
+  }
+
+  /* apply the x/y crop based on the transformation */
+  switch (priv->buffer_transform) {
+    case WL_OUTPUT_TRANSFORM_NORMAL:
+      wp_src.x = priv->crop.x;
+      wp_src.y = priv->crop.y;
+      break;
+    case WL_OUTPUT_TRANSFORM_180:
+      wp_src.x = priv->buffer_width - (priv->crop.w + priv->crop.x);
+      wp_src.y = priv->buffer_height - (priv->crop.h + priv->crop.y);
+      break;
+    case WL_OUTPUT_TRANSFORM_FLIPPED:
+      wp_src.x = priv->buffer_width - (priv->crop.w + priv->crop.x);
+      wp_src.y = priv->crop.y;
+      break;
+    case WL_OUTPUT_TRANSFORM_FLIPPED_180:
+      wp_src.x = priv->crop.x;
+      wp_src.y = priv->buffer_height - (priv->crop.h + priv->crop.y);
+      break;
+    case WL_OUTPUT_TRANSFORM_90:
+      wp_src.x = priv->buffer_height - (priv->crop.h + priv->crop.y);
+      wp_src.y = priv->crop.x;
+      break;
+    case WL_OUTPUT_TRANSFORM_270:
+      wp_src.x = priv->crop.y;
+      wp_src.y = priv->buffer_width - (priv->crop.w + priv->crop.x);
+      break;
+    case WL_OUTPUT_TRANSFORM_FLIPPED_270:
+      wp_src.x = priv->buffer_height - (priv->crop.h + priv->crop.y);
+      wp_src.y = priv->buffer_width - (priv->crop.w + priv->crop.x);
+      break;
+    case WL_OUTPUT_TRANSFORM_FLIPPED_90:
+      wp_src.x = priv->crop.y;
+      wp_src.y = priv->crop.x;
+      break;
+
+    default:
+      g_assert_not_reached ();
+  }
+
+  dst.w = priv->render_rectangle.w;
+  dst.h = priv->render_rectangle.h;
+
+  /* center the video_subsurface inside area_subsurface */
+  if (priv->video_viewport) {
+    if (!priv->force_aspect_ratio)
+      res = dst;
+    else
+      gst_video_center_rect (&src, &dst, &res, TRUE);
+    wp_viewport_set_source (priv->video_viewport, wl_fixed_from_int (wp_src.x),
+        wl_fixed_from_int (wp_src.y), wl_fixed_from_int (wp_src.w),
+        wl_fixed_from_int (wp_src.h));
+
+    /* The protocol does not allow for a size set to 0 */
+    res.w = MAX (res.w, 1);
+    res.h = MAX (res.h, 1);
+
+    wp_viewport_set_destination (priv->video_viewport, res.w, res.h);
+  } else {
+    gst_video_center_rect (&src, &dst, &res, FALSE);
+  }
+
+  wl_subsurface_set_position (priv->video_subsurface, res.x, res.y);
+
+  priv->video_rectangle = res;
+}
+
+static void
+gst_wl_window_set_opaque (GstWlWindow * self, const GstVideoInfo * info)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  struct wl_compositor *compositor;
+  struct wl_region *region;
+
+  /* Set area opaque */
+  compositor = gst_wl_display_get_compositor (priv->display);
+  region = wl_compositor_create_region (compositor);
+  wl_region_add (region, 0, 0, G_MAXINT32, G_MAXINT32);
+  wl_surface_set_opaque_region (priv->area_surface, region);
+  wl_region_destroy (region);
+
+  if (!GST_VIDEO_INFO_HAS_ALPHA (info)) {
+    /* Set video opaque */
+    region = wl_compositor_create_region (compositor);
+    wl_region_add (region, 0, 0, G_MAXINT32, G_MAXINT32);
+    wl_surface_set_opaque_region (priv->video_surface, region);
+    wl_region_destroy (region);
+  }
+}
+
+static void
+frame_redraw_callback (void *data, struct wl_callback *callback, uint32_t time)
+{
+  GstWlWindow *self = data;
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  gboolean redraw;
+
+  GST_DEBUG_OBJECT (self, "frame_redraw_cb");
+
+  gst_wl_display_callback_destroy (priv->display, &priv->frame_callback);
+
+  g_mutex_lock (&priv->window_lock);
+  redraw = (priv->staged_buffer == priv->next_buffer);
+  g_object_unref (priv->next_buffer);
+  priv->next_buffer = priv->staged_buffer;
+  priv->staged_buffer = NULL;
+
+  if (priv->next_buffer || priv->clear_window)
+    gst_wl_window_commit_buffer (self, priv->next_buffer, redraw);
+
+  g_mutex_unlock (&priv->window_lock);
+}
+
+static const struct wl_callback_listener frame_callback_listener = {
+  frame_redraw_callback
+};
+
+static gboolean
+gst_wl_window_crop_rectangle_changed (GstWlWindow * self,
+    const GstVideoRectangle * pending_crop)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  if (priv->crop.x == pending_crop->x
+      && priv->crop.y == pending_crop->y
+      && priv->crop.w == pending_crop->w && priv->crop.h == pending_crop->h)
+    return FALSE;
+
+  return TRUE;
+}
+
+static void
+gst_wl_window_commit_buffer (GstWlWindow * self, GstWlBuffer * buffer,
+    gboolean redraw)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GstVideoInfo *info = &priv->src_video_info;
+  GstVideoMasteringDisplayInfo *minfo = &priv->src_minfo;
+  GstVideoContentLightLevel *linfo = &priv->src_linfo;
+  struct wl_callback *callback;
+  gboolean needs_layout_update = FALSE;
+  GstVideoRectangle crop = priv->crop;
+
+  if (G_UNLIKELY (priv->src_info_changed && !redraw)) {
+    priv->src_info_changed = FALSE;
+    priv->scaled_width =
+        gst_util_uint64_scale_int_round (info->width, info->par_n, info->par_d);
+    priv->video_width = priv->buffer_width = info->width;
+    priv->video_height = priv->buffer_height = info->height;
+
+    crop.w = priv->video_width;
+    crop.h = priv->video_height;
+
+    needs_layout_update = TRUE;
+  }
+
+  if (G_LIKELY (buffer)) {
+    GstVideoMeta *vmeta = gst_wl_buffer_get_video_meta (buffer);
+    GstVideoCropMeta *cmeta = gst_wl_buffer_get_video_crop_meta (buffer);
+
+    if (vmeta && (priv->buffer_width != vmeta->width
+            || priv->buffer_height != vmeta->height)) {
+      priv->buffer_width = vmeta->width;
+      priv->buffer_height = vmeta->height;
+      needs_layout_update = TRUE;
+    }
+
+    if (cmeta) {
+      crop.x = cmeta->x;
+      crop.y = cmeta->y;
+      crop.w = cmeta->width;
+      crop.h = cmeta->height;
+    }
+  }
+
+  if (gst_wl_window_crop_rectangle_changed (self, &crop)) {
+    priv->crop = crop;
+    needs_layout_update = TRUE;
+  }
+
+  if (G_UNLIKELY (needs_layout_update)) {
+    wl_subsurface_set_sync (priv->video_subsurface);
+    gst_wl_window_resize_video_surface (self);
+    gst_wl_window_set_opaque (self, info);
+
+    gst_wl_window_set_colorimetry (self, &info->colorimetry, minfo, linfo);
+  }
+
+  if (G_LIKELY (buffer)) {
+    callback = wl_surface_frame (priv->video_surface_wrapper);
+    priv->frame_callback = callback;
+    wl_callback_add_listener (callback, &frame_callback_listener, self);
+
+    gst_wl_buffer_attach (buffer, priv->video_surface_wrapper);
+
+    wl_surface_damage_buffer (priv->video_surface_wrapper, 0, 0, G_MAXINT32,
+        G_MAXINT32);
+    wl_surface_commit (priv->video_surface_wrapper);
+
+    if (!priv->is_area_surface_mapped) {
+      gst_wl_window_update_borders (self);
+      wl_surface_commit (priv->area_surface_wrapper);
+      priv->is_area_surface_mapped = TRUE;
+      g_signal_emit (self, signals[MAP], 0);
+    }
+  } else {
+    /* clear both video and parent surfaces */
+    wl_surface_attach (priv->video_surface_wrapper, NULL, 0, 0);
+    wl_surface_commit (priv->video_surface_wrapper);
+    wl_surface_attach (priv->area_surface_wrapper, NULL, 0, 0);
+    wl_surface_commit (priv->area_surface_wrapper);
+    priv->is_area_surface_mapped = FALSE;
+    priv->clear_window = FALSE;
+  }
+
+  if (G_UNLIKELY (needs_layout_update)) {
+    /* commit also the parent (area_surface) in order to change
+     * the position of the video_subsurface */
+    wl_surface_commit (priv->area_surface_wrapper);
+    wl_subsurface_set_desync (priv->video_subsurface);
+  }
+}
+
+static void
+commit_callback (void *data, struct wl_callback *callback, uint32_t serial)
+{
+  GstWlWindow *self = data;
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  gst_wl_display_callback_destroy (priv->display, &priv->commit_callback);
+
+  g_mutex_lock (&priv->window_lock);
+  gst_wl_window_commit_buffer (self, priv->next_buffer, FALSE);
+  g_mutex_unlock (&priv->window_lock);
+}
+
+static const struct wl_callback_listener commit_listener = {
+  commit_callback
+};
+
+static gboolean
+gst_wl_window_update_pool (GstWlWindow * self, GstAllocator * allocator)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  gsize size = priv->src_video_info.size;
+  GstStructure *config;
+
+  if (priv->pool) {
+    gst_buffer_pool_set_active (priv->pool, FALSE);
+    gst_object_unref (priv->pool);
+  }
+  priv->pool = gst_wl_video_buffer_pool_new ();
+  gst_object_ref_sink (priv->pool);
+
+  config = gst_buffer_pool_get_config (priv->pool);
+  gst_buffer_pool_config_set_params (config, priv->src_caps, size, 2, 0);
+  gst_buffer_pool_config_set_allocator (config, allocator, NULL);
+
+  if (!gst_buffer_pool_set_config (priv->pool, config))
+    return FALSE;
+
+  return gst_buffer_pool_set_active (priv->pool, TRUE);
+}
+
+static gboolean
+gst_wl_window_activate_shm_pool (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GstAllocator *alloc = NULL;
+
+  if (priv->pool && gst_buffer_pool_is_active (priv->pool)) {
+    GstStructure *config = gst_buffer_pool_get_config (priv->pool);
+    gboolean is_shm = FALSE;
+
+    if (gst_buffer_pool_config_get_allocator (config, &alloc, NULL) && alloc)
+      is_shm = GST_IS_SHM_ALLOCATOR (alloc);
+
+    gst_structure_free (config);
+
+    if (is_shm)
+      return TRUE;
+  }
+
+  alloc = gst_shm_allocator_get ();
+  gst_wl_window_update_pool (self, alloc);
+  gst_object_unref (alloc);
+
+  return TRUE;
+}
+
+static gboolean
+gst_wl_window_activate_drm_dumb_pool (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GstAllocator *alloc;
+
+  if (!priv->drm_device)
+    return FALSE;
+
+  if (priv->pool && gst_buffer_pool_is_active (priv->pool)) {
+    GstStructure *config = gst_buffer_pool_get_config (priv->pool);
+    gboolean ret = FALSE;
+    gboolean is_drm_dumb = FALSE;
+
+    ret = gst_buffer_pool_config_get_allocator (config, &alloc, NULL);
+    gst_structure_free (config);
+
+    if (ret && alloc)
+      is_drm_dumb = GST_IS_DRM_DUMB_ALLOCATOR (alloc);
+
+    if (is_drm_dumb)
+      return TRUE;
+  }
+
+  alloc = gst_drm_dumb_allocator_new_with_device_path (priv->drm_device);
+  if (!alloc)
+    return FALSE;
+
+  gst_wl_window_update_pool (self, alloc);
+  gst_object_unref (alloc);
+
+  return TRUE;
+}
+
+static GstFlowReturn
+gst_wl_window_copy_frame (GstWlWindow * self, GstBuffer * src_buffer,
+    GstBuffer * dst_buffer)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GstVideoFrame src, dst;
+
+  if (!gst_video_frame_map (&dst, &priv->src_video_info, dst_buffer,
+          GST_MAP_WRITE))
+    goto dst_map_failed;
+
+  if (!gst_video_frame_map (&src, &priv->src_video_info, src_buffer,
+          GST_MAP_READ)) {
+    gst_video_frame_unmap (&dst);
+    goto src_map_failed;
+  }
+
+  gst_video_frame_copy (&dst, &src);
+
+  gst_video_frame_unmap (&src);
+  gst_video_frame_unmap (&dst);
+
+  GstVideoCropMeta *src_cmeta = gst_buffer_get_video_crop_meta (src_buffer);
+  if (src_cmeta) {
+    GstVideoCropMeta *dst_cmeta = gst_buffer_add_video_crop_meta (dst_buffer);
+    dst_cmeta->x = src_cmeta->x;
+    dst_cmeta->y = src_cmeta->y;
+    dst_cmeta->width = src_cmeta->width;
+    dst_cmeta->height = src_cmeta->height;
+  }
+
+  return GST_FLOW_OK;
+
+src_map_failed:
+  {
+    GST_ERROR_OBJECT (self, "Video memory can not be read from userspace.");
+    return GST_FLOW_ERROR;
+  }
+dst_map_failed:
+  {
+    GST_ERROR_OBJECT (self, "Video memory can not be written from userspace.");
+    return GST_FLOW_ERROR;
+  }
+}
+
+/* Import a GstBuffer as a wl_buffer. On success, *to_render will point to the
+ * buffer that has the GstWlBuffer attached (may be a copy from an internal pool
+ * if the original could not be imported directly). */
+static GstFlowReturn
+gst_wl_window_import_buffer (GstWlWindow * self, GstBuffer * buffer,
+    GstWlBuffer ** to_render)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GstWlBuffer *wlbuffer;
+  struct wl_buffer *wbuf = NULL;
+  GstFlowReturn ret = GST_FLOW_OK;
+
+  wlbuffer = gst_buffer_get_wl_buffer (self, buffer);
+
+  if (G_LIKELY (wlbuffer)) {
+    GST_LOG_OBJECT (self,
+        "buffer %" GST_PTR_FORMAT " has a wl_buffer from our display, "
+        "writing directly", buffer);
+    *to_render = wlbuffer;
+    return GST_FLOW_OK;
+  }
+
+  GST_LOG_OBJECT (self,
+      "buffer %" GST_PTR_FORMAT " does not have a wl_buffer from our "
+      "display, creating it", buffer);
+
+  if (gst_wl_display_check_format_for_dmabuf (priv->display,
+          &priv->src_drm_info)) {
+    guint i, nb_dmabuf = 0;
+
+    for (i = 0; i < gst_buffer_n_memory (buffer); i++)
+      if (gst_is_dmabuf_memory (gst_buffer_peek_memory (buffer, i)))
+        nb_dmabuf++;
+
+    if (nb_dmabuf && (nb_dmabuf == gst_buffer_n_memory (buffer)))
+      wbuf = gst_wl_linux_dmabuf_construct_wl_buffer (buffer, priv->display,
+          &priv->src_drm_info);
+
+    if (!wbuf && !priv->skip_dumb_buffer_copy) {
+      GstBuffer *pool_buf;
+
+      if (!gst_wl_window_activate_drm_dumb_pool (self)) {
+        priv->skip_dumb_buffer_copy = TRUE;
+        goto handle_shm;
+      }
+
+      ret = gst_buffer_pool_acquire_buffer (priv->pool, &pool_buf, NULL);
+      if (ret != GST_FLOW_OK)
+        goto no_buffer;
+
+      wlbuffer = gst_buffer_get_wl_buffer (self, pool_buf);
+
+      if (G_UNLIKELY (!wlbuffer)) {
+        wbuf = gst_wl_linux_dmabuf_construct_wl_buffer (pool_buf,
+            priv->display, &priv->src_drm_info);
+
+        if (G_UNLIKELY (!wbuf)) {
+          GST_WARNING_OBJECT (self, "failed to import DRM Dumb dmabuf");
+          gst_clear_buffer (&pool_buf);
+          priv->skip_dumb_buffer_copy = TRUE;
+          goto handle_shm;
+        }
+
+        wlbuffer = gst_buffer_add_wl_buffer (pool_buf, wbuf, self);
+      }
+
+      /* The wlbuffer holds a reference on pool_buf, drop ours to make
+       * it writable. */
+      gst_buffer_unref (pool_buf);
+      ret = gst_wl_window_copy_frame (self, buffer, pool_buf);
+      if (ret != GST_FLOW_OK) {
+        g_object_unref (wlbuffer);
+        return ret;
+      }
+
+      *to_render = wlbuffer;
+      return GST_FLOW_OK;
+    }
+  }
+
+handle_shm:
+  if (!wbuf && gst_wl_display_check_format_for_shm (priv->display,
+          &priv->src_video_info)) {
+    wbuf = gst_wl_shm_memory_construct_wl_buffer (buffer, priv->display,
+        &priv->src_video_info);
+
+    if (!wbuf) {
+      GstBuffer *pool_buf;
+
+      GST_LOG_OBJECT (self,
+          "buffer %" GST_PTR_FORMAT " cannot have a wl_buffer, "
+          "copying to wl_shm memory", buffer);
+
+      if (!gst_wl_window_activate_shm_pool (self))
+        goto activate_failed;
+
+      ret = gst_buffer_pool_acquire_buffer (priv->pool, &pool_buf, NULL);
+      if (ret != GST_FLOW_OK)
+        goto no_buffer;
+
+      wlbuffer = gst_buffer_get_wl_buffer (self, pool_buf);
+
+      if (G_UNLIKELY (!wlbuffer)) {
+        wbuf = gst_wl_shm_memory_construct_wl_buffer (pool_buf, priv->display,
+            &priv->src_video_info);
+
+        if (G_UNLIKELY (!wbuf)) {
+          gst_buffer_unref (pool_buf);
+          goto no_wl_buffer_shm;
+        }
+
+        wlbuffer = gst_buffer_add_wl_buffer (pool_buf, wbuf, self);
+      }
+
+      /* The wlbuffer holds a reference on pool_buf, drop ours to make
+       * it writable. */
+      gst_buffer_unref (pool_buf);
+      ret = gst_wl_window_copy_frame (self, buffer, pool_buf);
+      if (ret != GST_FLOW_OK) {
+        gst_object_unref (wlbuffer);
+        return ret;
+      }
+
+      *to_render = wlbuffer;
+      return GST_FLOW_OK;
+    }
+  }
+
+  if (!wbuf)
+    goto no_wl_buffer;
+
+  *to_render = gst_buffer_add_wl_buffer (buffer, wbuf, self);
+  return GST_FLOW_OK;
+
+no_buffer:
+  {
+    GST_ERROR_OBJECT (self, "could not create buffer");
+    return GST_FLOW_ERROR;
+  }
+no_wl_buffer_shm:
+  {
+    GST_ERROR_OBJECT (self, "could not create wl_buffer out of wl_shm memory");
+    return GST_FLOW_ERROR;
+  }
+no_wl_buffer:
+  {
+    GST_ERROR_OBJECT (self,
+        "buffer %" GST_PTR_FORMAT " cannot have a wl_buffer", buffer);
+    return GST_FLOW_ERROR;
+  }
+activate_failed:
+  {
+    GST_ERROR_OBJECT (self, "failed to activate bufferpool.");
+    return GST_FLOW_ERROR;
+  }
+}
+
+static void
+gst_wl_window_clear_buffers (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GList *buffers;
+
+  GST_DEBUG_OBJECT (self, "Removing all cached wl_buffer");
+  g_mutex_lock (&priv->buffers_mutex);
+  g_hash_table_foreach (priv->buffers, (GHFunc) gst_wl_buffer_weak_unref, self);
+  buffers = g_hash_table_get_values (priv->buffers);
+  g_hash_table_steal_all (priv->buffers);
+  g_mutex_unlock (&priv->buffers_mutex);
+
+  g_list_free_full (buffers, gst_object_unref);
+}
+
+/**
+ * gst_wl_window_render:
+ * @self: a #GstWlWindow
+ * @buffer: (nullable): the #GstBuffer to render, or %NULL to clear the surface
+*
+ * Renders @buffer on the Wayland surface managed by @self. If the buffer
+ * does not yet have an associated wl_buffer, one is created automatically
+ * using the source info previously set with gst_wl_window_set_source_info().
+ * Passing %NULL clears the surface.
+ *
+ * Returns: a #GstFlowReturn — %GST_FLOW_OK on success,
+ *   %GST_BASE_SINK_FLOW_DROPPED if a previously staged frame was dropped
+ *   (replaced), or %GST_FLOW_ERROR on failure.
+ *
+ * Since: 1.30
+ */
+GstFlowReturn
+gst_wl_window_render (GstWlWindow * self, GstBuffer * buffer)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  GstWlBuffer *to_render = NULL;
+  GstFlowReturn ret = GST_FLOW_OK;
+  gboolean dropped = FALSE;
+
+  if (G_LIKELY (buffer)) {
+    /* Handle crop meta that changes actual buffer dimensions */
+    if (gst_buffer_get_video_crop_meta (buffer)) {
+      GstVideoMeta *vmeta = gst_buffer_get_video_meta (buffer);
+      if (vmeta && priv->src_caps) {
+        GstStructure *s;
+        gint padded_width = 0, padded_height = 0;
+
+        s = gst_caps_get_structure (priv->src_caps, 0);
+        gst_structure_get (s, "width", G_TYPE_INT, &padded_width,
+            "height", G_TYPE_INT, &padded_height, NULL);
+
+        if (vmeta->width != padded_width || vmeta->height != padded_height) {
+          priv->src_caps = gst_caps_make_writable (priv->src_caps);
+          s = gst_caps_get_structure (priv->src_caps, 0);
+          gst_structure_set (s, "width", G_TYPE_INT, vmeta->width,
+              "height", G_TYPE_INT, vmeta->height, NULL);
+
+          if (priv->pool) {
+            gst_buffer_pool_set_active (priv->pool, FALSE);
+            gst_clear_object (&priv->pool);
+          }
+
+          gst_video_info_set_format (&priv->src_video_info, vmeta->format,
+              vmeta->width, vmeta->height);
+        }
+      }
+    }
+
+    if (priv->src_info_changed)
+      gst_wl_window_clear_buffers (self);
+
+    ret = gst_wl_window_import_buffer (self, buffer, &to_render);
+    if (ret != GST_FLOW_OK)
+      return ret;
+
+    gst_clear_object (&priv->last_rendered);
+    priv->last_rendered = to_render;
+  }
+
+  g_mutex_lock (&priv->window_lock);
+
+  if (priv->next_buffer && priv->staged_buffer) {
+    GST_LOG_OBJECT (self, "buffer %p dropped (replaced)", priv->staged_buffer);
+    gst_wl_buffer_detach (priv->staged_buffer);
+    g_clear_object (&priv->staged_buffer);
+
+    dropped = TRUE;
+  }
+
+  if (to_render)
+    g_object_ref (to_render);
+
+  if (!priv->next_buffer) {
+    priv->next_buffer = to_render;
+    priv->commit_callback =
+        gst_wl_display_sync (priv->display, &commit_listener, self);
+    wl_display_flush (gst_wl_display_get_display (priv->display));
+  } else {
+    priv->staged_buffer = to_render;
+  }
+  if (!buffer)
+    priv->clear_window = TRUE;
+
+  g_mutex_unlock (&priv->window_lock);
+
+  return dropped ? GST_BASE_SINK_FLOW_DROPPED : GST_FLOW_OK;
+}
+
+/**
+ * gst_wl_window_flush:
+ * @self: a #GstWlWindow
+ *
+ * Releases and drops the currently staged buffer associated with the window,
+ * if one exists. This function is thread-safe and will set the staged buffer
+ * pointer to NULL after unreferencing it.
+ *
+ * Returns: %TRUE if flush successful, %FALSE otherwise.
+ *
+ * Since: 1.28
+ */
+gboolean
+gst_wl_window_flush (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  g_mutex_lock (&priv->window_lock);
+  if (priv->staged_buffer) {
+    GST_LOG_OBJECT (self, "drop buffer %p", priv->staged_buffer);
+    gst_wl_buffer_detach (priv->staged_buffer);
+    gst_clear_object (&priv->staged_buffer);
+  }
+  gst_clear_object (&priv->next_buffer);
+  gst_clear_object (&priv->last_rendered);
+  gst_clear_object (&priv->area_surface_buffer);
+  g_mutex_unlock (&priv->window_lock);
+
+  gst_wl_window_clear_buffers (self);
+
+  return TRUE;
+}
+
+/* Update the buffer used to draw black borders. When we have viewporter
+ * support, this is a scaled up 1x1 image, and without we need an black image
+ * the size of the rendering areay. */
+static void
+gst_wl_window_update_borders (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  gint width, height;
+  GstBuffer *buf;
+  struct wl_buffer *wlbuf;
+  struct wp_single_pixel_buffer_manager_v1 *single_pixel;
+
+  if (gst_wl_display_get_viewporter (priv->display)) {
+    wp_viewport_set_destination (priv->area_viewport,
+        priv->render_rectangle.w, priv->render_rectangle.h);
+
+    if (priv->is_area_surface_mapped) {
+      /* The area_surface is already visible and only needed to get resized.
+       * We don't need to attach a new buffer and are done here. */
+      return;
+    }
+  }
+
+  if (gst_wl_display_get_viewporter (priv->display)) {
+    width = height = 1;
+  } else {
+    width = priv->render_rectangle.w;
+    height = priv->render_rectangle.h;
+  }
+
+  /* draw the area_subsurface */
+  single_pixel =
+      gst_wl_display_get_single_pixel_buffer_manager_v1 (priv->display);
+  if (width == 1 && height == 1 && single_pixel) {
+    buf = gst_buffer_new_allocate (NULL, 1, NULL);
+    wlbuf =
+        wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer (single_pixel,
+        0, 0, 0, 0xffffffffU);
+  } else {
+    GstVideoFormat format;
+    GstVideoInfo info;
+    GstAllocator *alloc;
+
+    /* we want WL_SHM_FORMAT_XRGB8888 */
+    format = GST_VIDEO_FORMAT_BGRx;
+    gst_video_info_set_format (&info, format, width, height);
+    alloc = gst_shm_allocator_get ();
+
+    buf = gst_buffer_new_allocate (alloc, info.size, NULL);
+    gst_buffer_memset (buf, 0, 0, info.size);
+
+    wlbuf = gst_wl_shm_memory_construct_wl_buffer (buf, priv->display, &info);
+
+    g_object_unref (alloc);
+  }
+
+  gst_clear_object (&priv->area_surface_buffer);
+  priv->area_surface_buffer = gst_buffer_add_wl_buffer (buf, wlbuf, self);
+  gst_wl_buffer_attach (priv->area_surface_buffer, priv->area_surface_wrapper);
+
+  wl_surface_damage_buffer (priv->area_surface_wrapper, 0, 0, G_MAXINT32,
+      G_MAXINT32);
+
+  /* at this point, the GstWlBuffer keeps the buffer
+   * alive and will free it on wl_buffer::release */
+  gst_buffer_unref (buf);
+}
+
+static void
+gst_wl_window_update_geometry (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  /* position the area inside the parent - needs a parent commit to apply */
+  if (priv->area_subsurface) {
+    wl_subsurface_set_position (priv->area_subsurface, priv->render_rectangle.x,
+        priv->render_rectangle.y);
+  }
+
+  if (priv->is_area_surface_mapped)
+    gst_wl_window_update_borders (self);
+
+  if (!priv->configured)
+    return;
+
+  if (priv->scaled_width != 0) {
+    wl_subsurface_set_sync (priv->video_subsurface);
+    gst_wl_window_resize_video_surface (self);
+    wl_surface_commit (priv->video_surface_wrapper);
+  }
+
+  wl_surface_commit (priv->area_surface_wrapper);
+
+  if (priv->scaled_width != 0)
+    wl_subsurface_set_desync (priv->video_subsurface);
+}
+
+void
+gst_wl_window_set_render_rectangle (GstWlWindow * self, gint x, gint y,
+    gint w, gint h)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  if (priv->render_rectangle.x == x && priv->render_rectangle.y == y &&
+      priv->render_rectangle.w == w && priv->render_rectangle.h == h)
+    return;
+
+  priv->render_rectangle.x = x;
+  priv->render_rectangle.y = y;
+  priv->render_rectangle.w = w;
+  priv->render_rectangle.h = h;
+
+  gst_wl_window_update_geometry (self);
+}
+
+const GstVideoRectangle *
+gst_wl_window_get_render_rectangle (GstWlWindow * self)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  return &priv->render_rectangle;
+}
+
+static enum wl_output_transform
+output_transform_from_orientation_method (GstVideoOrientationMethod method)
+{
+  switch (method) {
+    case GST_VIDEO_ORIENTATION_IDENTITY:
+      return WL_OUTPUT_TRANSFORM_NORMAL;
+    case GST_VIDEO_ORIENTATION_90R:
+      return WL_OUTPUT_TRANSFORM_90;
+    case GST_VIDEO_ORIENTATION_180:
+      return WL_OUTPUT_TRANSFORM_180;
+    case GST_VIDEO_ORIENTATION_90L:
+      return WL_OUTPUT_TRANSFORM_270;
+    case GST_VIDEO_ORIENTATION_HORIZ:
+      return WL_OUTPUT_TRANSFORM_FLIPPED;
+    case GST_VIDEO_ORIENTATION_VERT:
+      return WL_OUTPUT_TRANSFORM_FLIPPED_180;
+    case GST_VIDEO_ORIENTATION_UL_LR:
+      return WL_OUTPUT_TRANSFORM_FLIPPED_90;
+    case GST_VIDEO_ORIENTATION_UR_LL:
+      return WL_OUTPUT_TRANSFORM_FLIPPED_270;
+    default:
+      g_assert_not_reached ();
+  }
+}
+
+void
+gst_wl_window_set_rotate_method (GstWlWindow * self,
+    GstVideoOrientationMethod method)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  priv->buffer_transform = output_transform_from_orientation_method (method);
+
+  gst_wl_window_update_geometry (self);
+}
+
+enum ImageDescriptionFeedback
+{
+  IMAGE_DESCRIPTION_FEEDBACK_UNKNOWN = 0,
+  IMAGE_DESCRIPTION_FEEDBACK_READY,
+  IMAGE_DESCRIPTION_FEEDBACK_FAILED,
+};
+
+static void
+image_description_failed (void *data,
+    struct wp_image_description_v1 *wp_image_description_v1, uint32_t cause,
+    const char *msg)
+{
+  enum ImageDescriptionFeedback *image_description_feedback = data;
+
+  *image_description_feedback = IMAGE_DESCRIPTION_FEEDBACK_FAILED;
+}
+
+static void
+image_description_ready (void *data,
+    struct wp_image_description_v1 *wp_image_description_v1, uint32_t identity)
+{
+  enum ImageDescriptionFeedback *image_description_feedback = data;
+
+  *image_description_feedback = IMAGE_DESCRIPTION_FEEDBACK_READY;
+}
+
+static const struct wp_image_description_v1_listener description_listerer = {
+  .failed = image_description_failed,
+  .ready = image_description_ready,
+};
+
+static enum wp_color_manager_v1_transfer_function
+gst_colorimetry_tf_to_wl (GstVideoTransferFunction tf)
+{
+  switch (tf) {
+    case GST_VIDEO_TRANSFER_SRGB:
+      return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB;
+    case GST_VIDEO_TRANSFER_BT601:
+    case GST_VIDEO_TRANSFER_BT709:
+    case GST_VIDEO_TRANSFER_BT2020_10:
+      return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_BT1886;
+    case GST_VIDEO_TRANSFER_SMPTE2084:
+      return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ;
+    case GST_VIDEO_TRANSFER_ARIB_STD_B67:
+      return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG;
+    default:
+      GST_WARNING ("Transfer function not handled");
+      return 0;
+  }
+}
+
+static enum wp_color_manager_v1_primaries
+gst_colorimetry_primaries_to_wl (GstVideoColorPrimaries primaries)
+{
+  switch (primaries) {
+    case GST_VIDEO_COLOR_PRIMARIES_BT709:
+      return WP_COLOR_MANAGER_V1_PRIMARIES_SRGB;
+    case GST_VIDEO_COLOR_PRIMARIES_SMPTE170M:
+      return WP_COLOR_MANAGER_V1_PRIMARIES_NTSC;
+    case GST_VIDEO_COLOR_PRIMARIES_BT2020:
+      return WP_COLOR_MANAGER_V1_PRIMARIES_BT2020;
+    default:
+      GST_WARNING ("Primaries not handled");
+      return 0;
+  }
+}
+
+static enum wp_color_representation_surface_v1_coefficients
+gst_colorimetry_matrix_to_wl (GstVideoColorMatrix matrix)
+{
+  switch (matrix) {
+    case GST_VIDEO_COLOR_MATRIX_RGB:
+      return WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_IDENTITY;
+    case GST_VIDEO_COLOR_MATRIX_BT709:
+      return WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709;
+    case GST_VIDEO_COLOR_MATRIX_BT601:
+      return WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601;
+    case GST_VIDEO_COLOR_MATRIX_BT2020:
+      return WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020;
+    default:
+      GST_WARNING ("Matrix not handled");
+      return 0;
+  }
+}
+
+static enum wp_color_representation_surface_v1_range
+gst_colorimetry_range_to_wl (GstVideoColorRange range)
+{
+  switch (range) {
+    case GST_VIDEO_COLOR_RANGE_0_255:
+      return WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_FULL;
+    case GST_VIDEO_COLOR_RANGE_16_235:
+      return WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_LIMITED;
+    default:
+      GST_WARNING ("Range not handled");
+      return 0;
+  }
+}
+
+static void
+gst_wl_window_set_image_description (GstWlWindow * self,
+    const GstVideoColorimetry * colorimetry,
+    const GstVideoMasteringDisplayInfo * minfo,
+    const GstVideoContentLightLevel * linfo)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  struct wl_display *wl_display;
+  struct wp_color_manager_v1 *color_manager;
+  struct wp_color_manager_v1 *color_manager_wrapper = NULL;
+  struct wl_event_queue *color_manager_queue = NULL;
+  struct wp_image_description_v1 *image_description = NULL;
+  struct wp_image_description_creator_params_v1 *params;
+  enum ImageDescriptionFeedback image_description_feedback =
+      IMAGE_DESCRIPTION_FEEDBACK_UNKNOWN;
+  uint32_t wl_transfer_function;
+  uint32_t wl_primaries;
+
+  if (!gst_wl_display_is_color_parametric_creator_supported (priv->display)) {
+    GST_INFO_OBJECT (self,
+        "Color management or parametric creator not supported");
+    return;
+  }
+
+  color_manager = gst_wl_display_get_color_manager_v1 (priv->display);
+  if (!priv->color_management_surface) {
+    priv->color_management_surface =
+        wp_color_manager_v1_get_surface (color_manager,
+        priv->video_surface_wrapper);
+  }
+
+  wl_transfer_function = gst_colorimetry_tf_to_wl (colorimetry->transfer);
+  wl_primaries = gst_colorimetry_primaries_to_wl (colorimetry->primaries);
+
+  if (!gst_wl_display_is_color_transfer_function_supported (priv->display,
+          wl_transfer_function) ||
+      !gst_wl_display_are_color_primaries_supported (priv->display,
+          wl_primaries)) {
+    wp_color_management_surface_v1_unset_image_description
+        (priv->color_management_surface);
+
+    GST_INFO_OBJECT (self,
+        "Can not create image description: primaries or transfer function not supported");
+    return;
+  }
+
+  color_manager_wrapper = wl_proxy_create_wrapper (color_manager);
+  wl_display = gst_wl_display_get_display (priv->display);
+#ifdef HAVE_WL_EVENT_QUEUE_NAME
+  color_manager_queue = wl_display_create_queue_with_name (wl_display,
+      "GStreamer color manager queue");
+#else
+  color_manager_queue = wl_display_create_queue (wl_display);
+#endif
+  wl_proxy_set_queue ((struct wl_proxy *) color_manager_wrapper,
+      color_manager_queue);
+
+  params =
+      wp_color_manager_v1_create_parametric_creator (color_manager_wrapper);
+
+  wp_image_description_creator_params_v1_set_tf_named (params,
+      wl_transfer_function);
+  wp_image_description_creator_params_v1_set_primaries_named (params,
+      wl_primaries);
+
+  if (gst_wl_display_is_color_mastering_display_supported (priv->display)
+      && minfo) {
+    /* first validate our luminance range */
+    guint min_luminance = minfo->min_display_mastering_luminance / 10000;
+    guint max_luminance =
+        MAX (min_luminance + 1, minfo->max_display_mastering_luminance / 10000);
+
+    /* We need to convert from 0.00002 unit to 0.000001 */
+    const guint f = 20;
+    wp_image_description_creator_params_v1_set_mastering_display_primaries
+        (params,
+        minfo->display_primaries[0].x * f, minfo->display_primaries[0].y * f,
+        minfo->display_primaries[1].x * f, minfo->display_primaries[1].y * f,
+        minfo->display_primaries[2].x * f, minfo->display_primaries[2].y * f,
+        minfo->white_point.x * f, minfo->white_point.y * f);
+    wp_image_description_creator_params_v1_set_mastering_luminance (params,
+        minfo->min_display_mastering_luminance, max_luminance);
+
+    /*
+     * FIXME its unclear what makes a color volume exceeds the primary volume,
+     * and how to verify it, ignoring this aspect for now, but may need to be
+     * revisited.
+     */
+
+    /* We can't set the light level if we don't know the luminance range */
+    if (linfo) {
+      guint maxFALL = CLAMP (linfo->max_frame_average_light_level,
+          min_luminance + 1, max_luminance);
+      guint maxCLL =
+          CLAMP (linfo->max_content_light_level, maxFALL, max_luminance);
+      wp_image_description_creator_params_v1_set_max_cll (params, maxCLL);
+      wp_image_description_creator_params_v1_set_max_fall (params, maxFALL);
+    }
+  }
+
+  image_description = wp_image_description_creator_params_v1_create (params);
+  wp_image_description_v1_add_listener (image_description,
+      &description_listerer, &image_description_feedback);
+
+  while (image_description_feedback == IMAGE_DESCRIPTION_FEEDBACK_UNKNOWN) {
+    if (wl_display_dispatch_queue (wl_display, color_manager_queue) == -1)
+      break;
+  }
+
+  if (image_description_feedback == IMAGE_DESCRIPTION_FEEDBACK_READY) {
+    wp_color_management_surface_v1_set_image_description
+        (priv->color_management_surface, image_description,
+        WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
+
+    GST_INFO_OBJECT (self, "Successfully set parametric image description");
+  } else {
+    wp_color_management_surface_v1_unset_image_description
+        (priv->color_management_surface);
+
+    GST_INFO_OBJECT (self, "Creating image description failed");
+  }
+
+  /* Setting the image description has copy semantics */
+  wp_image_description_v1_destroy (image_description);
+  wl_proxy_wrapper_destroy (color_manager_wrapper);
+  wl_event_queue_destroy (color_manager_queue);
+}
+
+static void
+gst_wl_window_set_color_representation (GstWlWindow * self,
+    const GstVideoColorimetry * colorimetry)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  struct wp_color_representation_manager_v1 *cr_manager;
+  uint32_t wl_alpha_mode;
+  uint32_t wl_coefficients;
+  uint32_t wl_range;
+  gboolean alpha_mode_supported;
+  gboolean coefficients_supported;
+
+  cr_manager =
+      gst_wl_display_get_color_representation_manager_v1 (priv->display);
+  if (!cr_manager) {
+    GST_INFO_OBJECT (self, "Color representation not supported");
+    return;
+  }
+
+  wl_alpha_mode = WP_COLOR_REPRESENTATION_SURFACE_V1_ALPHA_MODE_STRAIGHT;
+  alpha_mode_supported =
+      gst_wl_display_is_color_alpha_mode_supported (priv->display,
+      wl_alpha_mode);
+
+  wl_coefficients = gst_colorimetry_matrix_to_wl (colorimetry->matrix);
+  wl_range = gst_colorimetry_range_to_wl (colorimetry->range);
+  coefficients_supported =
+      gst_wl_display_are_color_coefficients_supported (priv->display,
+      wl_coefficients, wl_range);
+
+  if (alpha_mode_supported || coefficients_supported) {
+    if (!priv->color_representation_surface) {
+      priv->color_representation_surface =
+          wp_color_representation_manager_v1_get_surface (cr_manager,
+          priv->video_surface_wrapper);
+    }
+
+    if (alpha_mode_supported)
+      wp_color_representation_surface_v1_set_alpha_mode
+          (priv->color_representation_surface, wl_alpha_mode);
+
+    if (coefficients_supported)
+      wp_color_representation_surface_v1_set_coefficients_and_range
+          (priv->color_representation_surface, wl_coefficients, wl_range);
+
+    GST_INFO_OBJECT (self, "Successfully set color representation");
+  } else {
+    if (priv->color_representation_surface) {
+      wp_color_representation_surface_v1_destroy
+          (priv->color_representation_surface);
+      priv->color_representation_surface = NULL;
+    }
+
+    GST_INFO_OBJECT (self, "Coefficients and range not supported");
+  }
+}
+
+static void
+gst_wl_window_set_colorimetry (GstWlWindow * self,
+    const GstVideoColorimetry * colorimetry,
+    const GstVideoMasteringDisplayInfo * minfo,
+    const GstVideoContentLightLevel * linfo)
+{
+  GST_OBJECT_LOCK (self);
+
+  GST_INFO_OBJECT (self, "Trying to set colorimetry: %s",
+      gst_video_colorimetry_to_string (colorimetry));
+
+  gst_wl_window_set_image_description (self, colorimetry, minfo, linfo);
+  gst_wl_window_set_color_representation (self, colorimetry);
+
+  GST_OBJECT_UNLOCK (self);
+}
+
+void
+gst_wl_window_set_force_aspect_ratio (GstWlWindow * self,
+    gboolean force_aspect_ratio)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  priv->force_aspect_ratio = force_aspect_ratio;
+
+  gst_wl_window_update_geometry (self);
+}
+
+/**
+ * gst_wl_window_set_source_info:
+ * @self: a #GstWlWindow
+ * @drm_info: (nullable): DRM format info for DMABuf import
+ * @video_info: the #GstVideoInfo describing the incoming video
+ * @caps: the negotiated #GstCaps
+ * @drm_device: (nullable): DRM device path for dumb buffer allocation
+ *
+ * Configures the source video format on @self so that
+ * gst_wl_window_render() can import buffers internally. This should be
+ * called whenever the stream format changes (i.e. from set_caps).
+ *
+ * Since: 1.30
+ */
+void
+gst_wl_window_set_source_info (GstWlWindow * self,
+    const GstVideoInfoDmaDrm * drm_info, const GstVideoInfo * video_info,
+    GstCaps * caps, const gchar * drm_device)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  g_return_if_fail (GST_IS_WL_WINDOW (self));
+  g_return_if_fail (video_info != NULL);
+  g_return_if_fail (caps != NULL);
+
+  if (priv->pool) {
+    gst_buffer_pool_set_active (priv->pool, FALSE);
+    gst_clear_object (&priv->pool);
+  }
+
+  priv->src_video_info = *video_info;
+
+  if (drm_info)
+    priv->src_drm_info = *drm_info;
+  else
+    gst_video_info_dma_drm_init (&priv->src_drm_info);
+
+  gst_caps_replace (&priv->src_caps, caps);
+
+  g_free (priv->drm_device);
+  priv->drm_device = g_strdup (drm_device);
+
+  priv->skip_dumb_buffer_copy = FALSE;
+  priv->src_info_changed = TRUE;
+}
+
+void
+gst_wl_window_register_buffer (GstWlWindow * self, gpointer gstmem,
+    gpointer wlbuffer)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  g_assert (!priv->shutting_down);
+
+  GST_TRACE_OBJECT (self, "registering GstWlBuffer %p to GstMem %p",
+      wlbuffer, gstmem);
+
+  g_mutex_lock (&priv->buffers_mutex);
+  gst_object_ref (wlbuffer);
+  g_hash_table_replace (priv->buffers, gstmem, wlbuffer);
+  gst_mini_object_weak_ref (GST_MINI_OBJECT (gstmem),
+      (GstMiniObjectNotify) gstmemory_disposed, self);
+  g_mutex_unlock (&priv->buffers_mutex);
+}
+
+gpointer
+gst_wl_window_lookup_buffer (GstWlWindow * self, gpointer gstmem)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+  gpointer wlbuffer;
+
+  g_mutex_lock (&priv->buffers_mutex);
+  wlbuffer = g_hash_table_lookup (priv->buffers, gstmem);
+  if (wlbuffer)
+    gst_object_ref (wlbuffer);
+  g_mutex_unlock (&priv->buffers_mutex);
+
+  GST_DEBUG_OBJECT (self, "Lookup up %p and fourn %p", gstmem, wlbuffer);
+  return wlbuffer;
+}
+
+void
+gst_wl_window_unregister_buffer (GstWlWindow * self, gpointer gstmem)
+{
+  GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  GST_TRACE_OBJECT (self, "unregistering GstWlBuffer owned by %p", gstmem);
+
+  g_mutex_lock (&priv->buffers_mutex);
+  if (g_hash_table_contains (priv->buffers, gstmem)) {
+    gst_mini_object_weak_unref (GST_MINI_OBJECT (gstmem),
+        (GstMiniObjectNotify) gstmemory_disposed, self);
+    g_hash_table_remove (priv->buffers, gstmem);
+  }
+  g_mutex_unlock (&priv->buffers_mutex);
+}

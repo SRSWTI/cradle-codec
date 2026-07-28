@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cradle-codec"
+version = "0.1.0"
+description = "gpu-native kv cache compression and streaming for heterogeneous inference systems"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["kv-cache", "llm-inference", "nvenc", "nvdec", "distributed-systems"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Distributed Computing",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "pynvvideocodec>=2.1 ; python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+gstreamer = [
+    "pygobject>=3.46",
+]
+serving = [
+    "accelerate>=0.30",
+    "lmcache>=0.5.1",
+    "torch>=2.1",
+    "transformers>=4.51",
+    "vllm>=0.10.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+cradle-codec = "cradle_codec.cli:app"
+
+[tool.hatch.build]
+exclude = [
+    "misc/video/**",
+    "src/cradle_codec/helpers/**",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cradle_codec"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

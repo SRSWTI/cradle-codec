@@ -1,0 +1,560 @@
+/* GStreamer
+ * Copyright (C) 2017 Matthew Waters <matthew@centricular.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Library General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Library General Public License for more details.
+ *
+ * You should have received a copy of the GNU Library General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+ * Boston, MA 02110-1301, USA.
+ */
+
+#ifdef HAVE_CONFIG_H
+# include "config.h"
+#endif
+
+#include "nicestream.h"
+#include "nicetransport.h"
+#include "niceutils.h"
+
+#define GST_CAT_DEFAULT gst_webrtc_nice_transport_debug
+GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
+
+enum
+{
+  SIGNAL_0,
+  LAST_SIGNAL,
+};
+
+enum
+{
+  PROP_0,
+  PROP_STREAM,
+  PROP_SEND_BUFFER_SIZE,
+  PROP_RECEIVE_BUFFER_SIZE
+};
+
+//static guint gst_webrtc_nice_transport_signals[LAST_SIGNAL] = { 0 };
+
+struct _GstWebRTCNiceTransportPrivate
+{
+  gboolean running;
+
+  gint send_buffer_size;
+  gint receive_buffer_size;
+  gulong on_new_selected_pair_id;
+  gulong on_component_state_changed_id;
+};
+
+#define gst_webrtc_nice_transport_parent_class parent_class
+G_DEFINE_TYPE_WITH_CODE (GstWebRTCNiceTransport, gst_webrtc_nice_transport,
+    GST_TYPE_WEBRTC_ICE_TRANSPORT, G_ADD_PRIVATE (GstWebRTCNiceTransport)
+    GST_DEBUG_CATEGORY_INIT (gst_webrtc_nice_transport_debug,
+        "webrtcnicetransport", 0, "webrtcnicetransport");
+    );
+
+static NiceComponentType
+_gst_component_to_nice (GstWebRTCICEComponent component)
+{
+  switch (component) {
+    case GST_WEBRTC_ICE_COMPONENT_RTP:
+      return NICE_COMPONENT_TYPE_RTP;
+    case GST_WEBRTC_ICE_COMPONENT_RTCP:
+      return NICE_COMPONENT_TYPE_RTCP;
+    default:
+      g_assert_not_reached ();
+      return 0;
+  }
+}
+
+static GstWebRTCICEComponent
+_nice_component_to_gst (NiceComponentType component)
+{
+  switch (component) {
+    case NICE_COMPONENT_TYPE_RTP:
+      return GST_WEBRTC_ICE_COMPONENT_RTP;
+    case NICE_COMPONENT_TYPE_RTCP:
+      return GST_WEBRTC_ICE_COMPONENT_RTCP;
+    default:
+      g_assert_not_reached ();
+      return 0;
+  }
+}
+
+static GstWebRTCICEConnectionState
+_nice_component_state_to_gst (NiceComponentState state)
+{
+  switch (state) {
+    case NICE_COMPONENT_STATE_DISCONNECTED:
+      return GST_WEBRTC_ICE_CONNECTION_STATE_DISCONNECTED;
+    case NICE_COMPONENT_STATE_GATHERING:
+      return GST_WEBRTC_ICE_CONNECTION_STATE_NEW;
+    case NICE_COMPONENT_STATE_CONNECTING:
+      return GST_WEBRTC_ICE_CONNECTION_STATE_CHECKING;
+    case NICE_COMPONENT_STATE_CONNECTED:
+      return GST_WEBRTC_ICE_CONNECTION_STATE_CONNECTED;
+    case NICE_COMPONENT_STATE_READY:
+      return GST_WEBRTC_ICE_CONNECTION_STATE_COMPLETED;
+    case NICE_COMPONENT_STATE_FAILED:
+      return GST_WEBRTC_ICE_CONNECTION_STATE_FAILED;
+    default:
+      g_assert_not_reached ();
+      return 0;
+  }
+}
+
+static void
+gst_webrtc_nice_transport_set_property (GObject * object, guint prop_id,
+    const GValue * value, GParamSpec * pspec)
+{
+  GstWebRTCNiceTransport *nice = GST_WEBRTC_NICE_TRANSPORT (object);
+
+  switch (prop_id) {
+    case PROP_STREAM:
+      if (nice->stream)
+        gst_object_unref (nice->stream);
+      nice->stream = g_value_dup_object (value);
+      break;
+    case PROP_SEND_BUFFER_SIZE:
+      nice->priv->send_buffer_size = g_value_get_int (value);
+      gst_webrtc_nice_transport_update_buffer_size (nice);
+      break;
+    case PROP_RECEIVE_BUFFER_SIZE:
+      nice->priv->receive_buffer_size = g_value_get_int (value);
+      gst_webrtc_nice_transport_update_buffer_size (nice);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
+gst_webrtc_nice_transport_get_property (GObject * object, guint prop_id,
+    GValue * value, GParamSpec * pspec)
+{
+  GstWebRTCNiceTransport *nice = GST_WEBRTC_NICE_TRANSPORT (object);
+
+  switch (prop_id) {
+    case PROP_STREAM:
+      g_value_set_object (value, nice->stream);
+      break;
+    case PROP_SEND_BUFFER_SIZE:
+      g_value_set_int (value, nice->priv->send_buffer_size);
+      break;
+    case PROP_RECEIVE_BUFFER_SIZE:
+      g_value_set_int (value, nice->priv->receive_buffer_size);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
+gst_webrtc_nice_transport_finalize (GObject * object)
+{
+  GstWebRTCNiceTransport *nice = GST_WEBRTC_NICE_TRANSPORT (object);
+  NiceAgent *agent;
+  GstWebRTCNice *webrtc_ice = NULL;
+
+  g_object_get (nice->stream, "ice", &webrtc_ice, NULL);
+
+  if (webrtc_ice) {
+    g_object_get (webrtc_ice, "agent", &agent, NULL);
+
+    if (nice->priv->on_component_state_changed_id != 0) {
+      g_signal_handler_disconnect (agent,
+          nice->priv->on_component_state_changed_id);
+    }
+
+    if (nice->priv->on_new_selected_pair_id != 0) {
+      g_signal_handler_disconnect (agent, nice->priv->on_new_selected_pair_id);
+    }
+
+    g_object_unref (agent);
+    gst_object_unref (webrtc_ice);
+  }
+
+  gst_object_unref (nice->stream);
+
+  G_OBJECT_CLASS (parent_class)->finalize (object);
+}
+
+void
+gst_webrtc_nice_transport_update_buffer_size (GstWebRTCNiceTransport * nice)
+{
+  NiceAgent *agent = NULL;
+  GPtrArray *sockets;
+  guint i;
+  GstWebRTCNice *webrtc_ice = NULL;
+
+  g_object_get (nice->stream, "ice", &webrtc_ice, NULL);
+
+  g_assert (webrtc_ice != NULL);
+
+  g_object_get (webrtc_ice, "agent", &agent, NULL);
+  g_assert (agent != NULL);
+
+  sockets =
+      nice_agent_get_sockets (agent,
+      GST_WEBRTC_ICE_STREAM (nice->stream)->stream_id, 1);
+  if (sockets == NULL) {
+    g_object_unref (agent);
+    gst_object_unref (webrtc_ice);
+    return;
+  }
+
+  for (i = 0; i < sockets->len; i++) {
+    GSocket *gsocket = g_ptr_array_index (sockets, i);
+#ifdef SO_SNDBUF
+    if (nice->priv->send_buffer_size != 0) {
+      GError *gerror = NULL;
+      if (!g_socket_set_option (gsocket, SOL_SOCKET, SO_SNDBUF,
+              nice->priv->send_buffer_size, &gerror))
+        GST_WARNING_OBJECT (nice, "Could not set send buffer size : %s",
+            gerror->message);
+      g_clear_error (&gerror);
+    }
+#endif
+#ifdef SO_RCVBUF
+    if (nice->priv->receive_buffer_size != 0) {
+      GError *gerror = NULL;
+      if (!g_socket_set_option (gsocket, SOL_SOCKET, SO_RCVBUF,
+              nice->priv->receive_buffer_size, &gerror))
+        GST_WARNING_OBJECT (nice, "Could not set send receive size : %s",
+            gerror->message);
+      g_clear_error (&gerror);
+    }
+#endif
+  }
+  g_ptr_array_unref (sockets);
+  g_object_unref (agent);
+  gst_object_unref (webrtc_ice);
+}
+
+
+static void
+_on_new_selected_pair (NiceAgent * agent, guint stream_id,
+    NiceComponentType component, NiceCandidate * lcandidate,
+    NiceCandidate * rcandidate, GWeakRef * nice_weak)
+{
+  GstWebRTCNiceTransport *nice = g_weak_ref_get (nice_weak);
+  GstWebRTCICETransport *ice;
+  GstWebRTCICEComponent comp = _nice_component_to_gst (component);
+  guint our_stream_id;
+
+  if (!nice)
+    return;
+
+  ice = GST_WEBRTC_ICE_TRANSPORT (nice);
+
+  g_object_get (nice->stream, "stream-id", &our_stream_id, NULL);
+
+  if (stream_id != our_stream_id)
+    goto cleanup;
+  if (comp != ice->component)
+    goto cleanup;
+
+  gst_webrtc_ice_transport_selected_pair_change (ice);
+
+cleanup:
+  gst_object_unref (nice);
+}
+
+static void
+_on_component_state_changed (NiceAgent * agent, guint stream_id,
+    NiceComponentType component, NiceComponentState state, GWeakRef * nice_weak)
+{
+  GstWebRTCNiceTransport *nice = g_weak_ref_get (nice_weak);
+  GstWebRTCICETransport *ice;
+  GstWebRTCICEComponent comp = _nice_component_to_gst (component);
+  guint our_stream_id;
+
+  if (!nice)
+    return;
+
+  ice = GST_WEBRTC_ICE_TRANSPORT (nice);
+
+  g_object_get (nice->stream, "stream-id", &our_stream_id, NULL);
+
+  if (stream_id != our_stream_id)
+    goto cleanup;
+  if (comp != ice->component)
+    goto cleanup;
+
+  GST_DEBUG_OBJECT (ice, "%u %u %s", stream_id, component,
+      nice_component_state_to_string (state));
+
+  gst_webrtc_ice_transport_connection_state_change (ice,
+      _nice_component_state_to_gst (state));
+
+cleanup:
+  gst_object_unref (nice);
+}
+
+static GWeakRef *
+weak_new (GstWebRTCNiceTransport * nice)
+{
+  GWeakRef *weak = g_new0 (GWeakRef, 1);
+  g_weak_ref_init (weak, nice);
+  return weak;
+}
+
+static void
+weak_free (GWeakRef * weak)
+{
+  g_weak_ref_clear (weak);
+  g_free (weak);
+}
+
+static GstWebRTCICECandidate *
+nice_candidate_to_gst (GstWebRTCNice * webrtc_ice,
+    NiceAgent * agent, NiceCandidate * cand,
+    GstWebRTCNiceCandidateOrigin origin)
+{
+  GstWebRTCICECandidate *gst_candidate = g_new0 (GstWebRTCICECandidate, 1);
+  gchar *attr = nice_agent_generate_local_candidate_sdp (agent, cand);
+  GstWebRTCICEComponent comp = _nice_component_to_gst (cand->component_id);
+  gchar *addr = nice_address_dup_string (&cand->addr);
+  guint port = nice_address_get_port (&cand->addr);
+  gchar *url =
+      origin ==
+      GST_WEBRTC_NICE_CANDIDATE_ORIGIN_LOCAL ?
+      gst_webrtc_nice_get_candidate_server_url (webrtc_ice,
+      cand) : NULL;
+
+  gst_candidate->stats = g_new0 (GstWebRTCICECandidateStats, 1);
+  GST_WEBRTC_ICE_CANDIDATE_STATS_TYPE (gst_candidate->stats) =
+      nice_candidate_type_to_string (cand->type);
+
+  GST_WEBRTC_ICE_CANDIDATE_STATS_PROTOCOL (gst_candidate->stats) =
+      cand->transport == NICE_CANDIDATE_TRANSPORT_UDP ? "udp" : "tcp";
+
+  switch (cand->transport) {
+    case NICE_CANDIDATE_TRANSPORT_UDP:
+      GST_WEBRTC_ICE_CANDIDATE_STATS_TCP_TYPE (gst_candidate->stats) =
+          GST_WEBRTC_ICE_TCP_CANDIDATE_TYPE_NONE;
+      break;
+    case NICE_CANDIDATE_TRANSPORT_TCP_ACTIVE:
+      GST_WEBRTC_ICE_CANDIDATE_STATS_TCP_TYPE (gst_candidate->stats) =
+          GST_WEBRTC_ICE_TCP_CANDIDATE_TYPE_ACTIVE;
+      break;
+    case NICE_CANDIDATE_TRANSPORT_TCP_PASSIVE:
+      GST_WEBRTC_ICE_CANDIDATE_STATS_TCP_TYPE (gst_candidate->stats) =
+          GST_WEBRTC_ICE_TCP_CANDIDATE_TYPE_PASSIVE;
+      break;
+    case NICE_CANDIDATE_TRANSPORT_TCP_SO:
+      GST_WEBRTC_ICE_CANDIDATE_STATS_TCP_TYPE (gst_candidate->stats) =
+          GST_WEBRTC_ICE_TCP_CANDIDATE_TYPE_SO;
+      break;
+  };
+
+  /* FIXME: sdpMid, sdpMLineIndex */
+  gst_candidate->sdp_mid = NULL;
+  gst_candidate->sdp_mline_index = -1;
+
+  gst_candidate->candidate = attr;
+  GST_WEBRTC_ICE_CANDIDATE_STATS_FOUNDATION (gst_candidate->stats) =
+      g_strdup (cand->foundation);
+  gst_candidate->component = comp;
+  GST_WEBRTC_ICE_CANDIDATE_STATS_PRIORITY (gst_candidate->stats) =
+      cand->priority;
+  GST_WEBRTC_ICE_CANDIDATE_STATS_ADDRESS (gst_candidate->stats) = addr;
+  GST_WEBRTC_ICE_CANDIDATE_STATS_PORT (gst_candidate->stats) = port;
+  GST_WEBRTC_ICE_CANDIDATE_STATS_USERNAME_FRAGMENT (gst_candidate->stats) =
+      g_strdup (cand->username);
+  GST_WEBRTC_ICE_CANDIDATE_STATS_URL (gst_candidate->stats) = NULL;
+  if (url && !g_str_equal (url, ""))
+    GST_WEBRTC_ICE_CANDIDATE_STATS_URL (gst_candidate->stats) = url;
+  if (!GST_WEBRTC_ICE_CANDIDATE_STATS_URL (gst_candidate->stats))
+    g_free (url);
+
+  GST_WEBRTC_ICE_CANDIDATE_STATS_RELATED_ADDRESS (gst_candidate->stats) = NULL;
+  GST_WEBRTC_ICE_CANDIDATE_STATS_RELATED_PORT (gst_candidate->stats) = -1;
+
+  if (cand->type == NICE_CANDIDATE_TYPE_RELAYED
+      && origin == GST_WEBRTC_NICE_CANDIDATE_ORIGIN_LOCAL) {
+    NiceAddress relay_address;
+
+    nice_candidate_relay_address (cand, &relay_address);
+    if (nice_address_is_valid (&relay_address)) {
+      GST_WEBRTC_ICE_CANDIDATE_STATS_RELATED_ADDRESS (gst_candidate->stats) =
+          nice_address_dup_string (&relay_address);
+      GST_WEBRTC_ICE_CANDIDATE_STATS_RELATED_PORT (gst_candidate->stats) =
+          nice_address_get_port (&relay_address);
+
+      /* FIXME: Set relayProtocol as one of these strings (udp, tcp, tls), from
+       * the candidate TURN server. libnice API needed for this. */
+    }
+  }
+
+  return gst_candidate;
+}
+
+static GstWebRTCICECandidatePair *
+gst_webrtc_nice_get_selected_candidate_pair (GstWebRTCICETransport * ice)
+{
+  GstWebRTCNiceTransport *nice = GST_WEBRTC_NICE_TRANSPORT (ice);
+  NiceAgent *agent = NULL;
+  GstWebRTCNice *webrtc_ice = NULL;
+  GstWebRTCICECandidatePair *candidates_pair = NULL;
+  GstWebRTCICEStream *nice_stream;
+  NiceCandidate *local_candidate = NULL;
+  NiceCandidate *remote_candidate = NULL;
+  NiceComponentType component;
+
+  nice_stream = GST_WEBRTC_ICE_STREAM (nice->stream);
+
+  g_object_get (nice->stream, "ice", &webrtc_ice, NULL);
+  g_assert (webrtc_ice != NULL);
+
+  g_object_get (webrtc_ice, "agent", &agent, NULL);
+  g_assert (agent != NULL);
+
+  component = _gst_component_to_nice (ice->component);
+
+  if (nice_agent_get_selected_pair (agent, nice_stream->stream_id, component,
+          &local_candidate, &remote_candidate)) {
+
+    gst_webrtc_nice_fill_local_candidate_credentials (agent, local_candidate);
+    gst_webrtc_nice_fill_remote_candidate_credentials (webrtc_ice,
+        remote_candidate);
+
+    candidates_pair = g_new0 (GstWebRTCICECandidatePair, 1);
+    candidates_pair->local =
+        nice_candidate_to_gst (webrtc_ice, agent, local_candidate,
+        GST_WEBRTC_NICE_CANDIDATE_ORIGIN_LOCAL);
+    candidates_pair->remote =
+        nice_candidate_to_gst (webrtc_ice, agent, remote_candidate,
+        GST_WEBRTC_NICE_CANDIDATE_ORIGIN_REMOTE);
+  }
+
+  g_object_unref (agent);
+  gst_object_unref (webrtc_ice);
+
+  return candidates_pair;
+}
+
+static void
+gst_webrtc_nice_transport_constructed (GObject * object)
+{
+  GstWebRTCNiceTransport *nice;
+  GstWebRTCICETransport *ice;
+  NiceComponentType component;
+  gboolean controlling_mode;
+  guint our_stream_id;
+  NiceAgent *agent;
+  GstWebRTCNice *webrtc_ice = NULL;
+
+  G_OBJECT_CLASS (parent_class)->constructed (object);
+
+  nice = GST_WEBRTC_NICE_TRANSPORT (object);
+  ice = GST_WEBRTC_ICE_TRANSPORT (object);
+  component = _gst_component_to_nice (ice->component);
+
+  g_object_get (nice->stream, "ice", &webrtc_ice, "stream-id", &our_stream_id,
+      NULL);
+  g_assert (webrtc_ice != NULL);
+  g_object_get (webrtc_ice, "agent", &agent, NULL);
+
+  g_object_get (agent, "controlling-mode", &controlling_mode, NULL);
+  ice->role =
+      controlling_mode ? GST_WEBRTC_ICE_ROLE_CONTROLLING :
+      GST_WEBRTC_ICE_ROLE_CONTROLLED;
+
+  nice->priv->on_component_state_changed_id = g_signal_connect_data (agent,
+      "component-state-changed", G_CALLBACK (_on_component_state_changed),
+      weak_new (nice), (GClosureNotify) weak_free, (GConnectFlags) 0);
+  nice->priv->on_new_selected_pair_id = g_signal_connect_data (agent,
+      "new-selected-pair-full", G_CALLBACK (_on_new_selected_pair),
+      weak_new (nice), (GClosureNotify) weak_free, (GConnectFlags) 0);
+
+  ice->src = gst_element_factory_make ("nicesrc", NULL);
+  if (ice->src) {
+    g_object_set (ice->src, "agent", agent, "stream", our_stream_id,
+        "component", component, NULL);
+  }
+  ice->sink = gst_element_factory_make ("nicesink", NULL);
+  if (ice->sink) {
+    g_object_set (ice->sink, "agent", agent, "stream", our_stream_id,
+        "component", component, "async", FALSE, "enable-last-sample", FALSE,
+        "sync", FALSE, NULL);
+  }
+
+  g_object_unref (agent);
+  gst_object_unref (webrtc_ice);
+}
+
+static void
+gst_webrtc_nice_transport_class_init (GstWebRTCNiceTransportClass * klass)
+{
+  GObjectClass *gobject_class = (GObjectClass *) klass;
+  GstWebRTCICETransportClass *transport_class =
+      (GstWebRTCICETransportClass *) klass;
+
+  gobject_class->constructed = gst_webrtc_nice_transport_constructed;
+  gobject_class->get_property = gst_webrtc_nice_transport_get_property;
+  gobject_class->set_property = gst_webrtc_nice_transport_set_property;
+  gobject_class->finalize = gst_webrtc_nice_transport_finalize;
+
+  transport_class->get_selected_candidate_pair =
+      gst_webrtc_nice_get_selected_candidate_pair;
+
+  g_object_class_install_property (gobject_class,
+      PROP_STREAM,
+      g_param_spec_object ("stream",
+          "WebRTC ICE Stream", "ICE stream associated with this transport",
+          GST_TYPE_WEBRTC_NICE_STREAM,
+          G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstWebRTCNiceTransport:send-buffer-size:
+   *
+   * Size of the kernel send buffer in bytes, 0=default
+   *
+   * Since: 1.20
+   */
+
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_SEND_BUFFER_SIZE, g_param_spec_int ("send-buffer-size",
+          "Send Buffer Size",
+          "Size of the kernel send buffer in bytes, 0=default", 0, G_MAXINT, 0,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstWebRTCNiceTransport:receive-buffer-size:
+   *
+   * Size of the kernel receive buffer in bytes, 0=default
+   *
+   * Since: 1.20
+   */
+
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_RECEIVE_BUFFER_SIZE, g_param_spec_int ("receive-buffer-size",
+          "Receive Buffer Size",
+          "Size of the kernel receive buffer in bytes, 0=default", 0, G_MAXINT,
+          0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+}
+
+static void
+gst_webrtc_nice_transport_init (GstWebRTCNiceTransport * nice)
+{
+  nice->priv = gst_webrtc_nice_transport_get_instance_private (nice);
+}
+
+GstWebRTCNiceTransport *
+gst_webrtc_nice_transport_new (GstWebRTCNiceStream * stream,
+    GstWebRTCICEComponent component)
+{
+  return g_object_new (GST_TYPE_WEBRTC_NICE_TRANSPORT, "stream", stream,
+      "component", component, NULL);
+}

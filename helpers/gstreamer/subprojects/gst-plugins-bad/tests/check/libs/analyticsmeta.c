@@ -1,0 +1,3518 @@
+/* GStreamer
+ * Copyright (C) 2022 Collabora Ltd
+ * Copyright (C) 2024 Intel Corporation
+ *
+ * analyticmeta.c
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Library General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Library General Public License for more details.
+ *
+ * You should have received a copy of the GNU Library General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+ * Boston, MA 02110-1301, USA.
+ */
+
+#include <gst/check/gstcheck.h>
+#include <gst/analytics/analytics.h>
+
+GST_START_TEST (test_add_classification_meta)
+{
+  /* Verify we can create a relation metadata
+   * and attach it classification mtd
+   */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsClsMtd cls_mtd;
+  gfloat conf_lvl[] = { 0.5f, 0.5f };
+  GQuark class_quarks[2];
+  gboolean ret;
+
+  class_quarks[0] = g_quark_from_string ("dog");
+  class_quarks[1] = g_quark_from_string ("cat");
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+  ret = gst_analytics_relation_meta_add_cls_mtd (rmeta, 2, conf_lvl,
+      class_quarks, &cls_mtd);
+  fail_unless (ret == TRUE);
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_meta_pooled)
+{
+  GstBufferPool *pool;
+  GstStructure *config;
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta1, *rmeta2;
+
+  pool = gst_buffer_pool_new ();
+  config = gst_buffer_pool_get_config (pool);
+  gst_buffer_pool_config_set_params (config, NULL, 1, 1, 1);
+  gst_buffer_pool_set_config (pool, config);
+  gst_buffer_pool_set_active (pool, TRUE);
+
+  gst_buffer_pool_acquire_buffer (pool, &buf, NULL);
+  rmeta1 = gst_buffer_add_analytics_relation_meta (buf);
+  gst_buffer_unref (buf);
+
+  gst_buffer_pool_acquire_buffer (pool, &buf, NULL);
+
+  rmeta2 = gst_buffer_add_analytics_relation_meta (buf);
+
+  fail_unless (rmeta1 == rmeta2);
+  gst_buffer_unref (buf);
+  gst_object_unref (pool);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_classification_meta_classes)
+{
+  /* Verify we can retrieve classification data
+   * from the relation metadata
+   */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  gboolean ret;
+  GQuark class_quarks[2];
+  GstAnalyticsClsMtd cls_mtd, cls_mtd2;
+
+  class_quarks[0] = g_quark_from_string ("dog");
+  class_quarks[1] = g_quark_from_string ("cat");
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+  gfloat conf_lvl[] = { 0.6f, 0.4f };
+  ret = gst_analytics_relation_meta_add_cls_mtd (rmeta, 2, conf_lvl,
+      class_quarks, &cls_mtd);
+  fail_unless (ret == TRUE);
+  fail_unless (gst_analytics_relation_get_length (rmeta) == 1);
+
+  gint dogIndex = gst_analytics_cls_mtd_get_index_by_quark (&cls_mtd,
+      class_quarks[0]);
+  fail_unless (dogIndex == 0);
+  gfloat confLvl = gst_analytics_cls_mtd_get_level (&cls_mtd, dogIndex);
+  GST_LOG ("dog:%f", confLvl);
+  assert_equals_float (confLvl, 0.6f);
+
+  gint catIndex = gst_analytics_cls_mtd_get_index_by_quark (&cls_mtd,
+      g_quark_from_string ("cat"));
+  confLvl = gst_analytics_cls_mtd_get_level (&cls_mtd, catIndex);
+  GST_LOG ("Cat:%f", confLvl);
+  assert_equals_float (confLvl, 0.4f);
+  assert_equals_int (gst_analytics_mtd_get_id ((GstAnalyticsMtd *) & cls_mtd),
+      0);
+
+  conf_lvl[0] = 0.1f;
+  conf_lvl[1] = 0.9f;
+  ret =
+      gst_analytics_relation_meta_add_cls_mtd (rmeta, 2, conf_lvl,
+      class_quarks, &cls_mtd2);
+  fail_unless (ret == TRUE);
+  fail_unless (gst_analytics_relation_get_length (rmeta) == 2);
+
+  dogIndex = gst_analytics_cls_mtd_get_index_by_quark (&cls_mtd2,
+      class_quarks[0]);
+  confLvl = gst_analytics_cls_mtd_get_level (&cls_mtd2, dogIndex);
+  assert_equals_float (confLvl, 0.1f);
+
+  catIndex = gst_analytics_cls_mtd_get_index_by_quark (&cls_mtd2,
+      class_quarks[0]);
+  confLvl = gst_analytics_cls_mtd_get_level (&cls_mtd2, catIndex);
+  assert_equals_float (confLvl, 0.1f);
+
+  /* Verify the relation meta contain the correct number of relatable metadata */
+  fail_unless (gst_analytics_relation_get_length (rmeta) == 2);
+
+  /* Verify first relatable metadata has the correct id. */
+  assert_equals_int (gst_analytics_mtd_get_id ((GstAnalyticsMtd *) & cls_mtd),
+      0);
+
+  /* Verify second relatable metadata has the correct id. */
+  assert_equals_int (gst_analytics_mtd_get_id (
+          (GstAnalyticsMtd *) & cls_mtd2), 1);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_relation_meta)
+{
+  /* Verify we set a relation between relatable metadata. */
+
+  GstBuffer *buf;
+  GstAnalyticsClsMtd cls_mtd[3];
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *relations;
+  GQuark class_quarks[2];
+  gboolean ret;
+
+  buf = gst_buffer_new ();
+  relations = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  gfloat conf_lvl[] = { 0.6f, 0.4f };
+  class_quarks[0] = g_quark_from_string ("dog");
+  class_quarks[1] = g_quark_from_string ("cat");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[0]);
+  fail_unless (ret == TRUE);
+  gst_analytics_mtd_get_id ((GstAnalyticsMtd *)
+      & cls_mtd[0]);
+
+  conf_lvl[0] = 0.6f;
+  conf_lvl[1] = 0.4f;
+
+  class_quarks[0] = g_quark_from_string ("plant");
+  class_quarks[1] = g_quark_from_string ("animal");
+
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[1]);
+  gst_analytics_mtd_get_id ((GstAnalyticsMtd *)
+      & cls_mtd[1]);
+
+  fail_unless (gst_analytics_relation_meta_set_relation (relations,
+          GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd[0].id,
+          cls_mtd[1].id) == TRUE);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_relation_inefficiency_reporting_cases)
+{
+  /*
+   * Verify inefficiency of relation order is reported.
+   */
+  GstBuffer *buf;
+  GstAnalyticsClsMtd cls_mtd[3];
+  GstAnalyticsRelationMetaInitParams init_params = { 2, 10 };
+  GstAnalyticsRelationMeta *relations;
+  gboolean ret;
+  GQuark class_quarks[2];
+
+
+  buf = gst_buffer_new ();
+  relations = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  gfloat conf_lvl[] = { 0.6f, 0.4f };
+
+  class_quarks[0] = g_quark_from_string ("dog");
+  class_quarks[1] = g_quark_from_string ("cat");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[0]);
+  fail_unless (gst_analytics_relation_get_length (relations) == 1);
+  fail_unless (ret == TRUE);
+
+  conf_lvl[0] = 0.6f;
+  conf_lvl[1] = 0.4f;
+  class_quarks[0] = g_quark_from_string ("plant");
+  class_quarks[1] = g_quark_from_string ("animal");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[1]);
+  fail_unless (gst_analytics_relation_get_length (relations) == 2);
+  fail_unless (ret == TRUE);
+
+  conf_lvl[0] = 0.6f;
+  conf_lvl[1] = 0.4f;
+  class_quarks[0] = g_quark_from_string ("male");
+  class_quarks[1] = g_quark_from_string ("female");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[2]);
+  fail_unless (gst_analytics_relation_get_length (relations) == 3);
+  fail_unless (ret == TRUE);
+
+  fail_unless (gst_analytics_relation_meta_set_relation (relations,
+          GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd[0].id, cls_mtd[1].id)
+      == TRUE);
+  fail_unless (gst_analytics_relation_meta_set_relation (relations,
+          GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd[0].id, cls_mtd[2].id)
+      == TRUE);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_query_relation_meta_cases)
+{
+  /* Verify we can query existence of direct and indirect relation */
+  GstBuffer *buf;
+  GstAnalyticsClsMtd cls_mtd[3];
+  GstAnalyticsRelationMetaInitParams init_params = { 2, 150 };
+  GstAnalyticsRelationMeta *relations;
+  gboolean ret;
+  GQuark class_quarks[2];
+
+  buf = gst_buffer_new ();
+  relations = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  gfloat conf_lvl[] = { 0.6f, 0.4f };
+
+  class_quarks[0] = g_quark_from_string ("dog");
+  class_quarks[1] = g_quark_from_string ("cat");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[0]);
+  fail_unless (ret == TRUE);
+
+  conf_lvl[0] = 0.6f;
+  conf_lvl[1] = 0.4f;
+  class_quarks[0] = g_quark_from_string ("plant");
+  class_quarks[1] = g_quark_from_string ("animal");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[1]);
+  fail_unless (ret == TRUE);
+
+  conf_lvl[0] = 0.6f;
+  conf_lvl[1] = 0.4f;
+  class_quarks[0] = g_quark_from_string ("male");
+  class_quarks[1] = g_quark_from_string ("female");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[2]);
+  fail_unless (ret == TRUE);
+
+  // Pet is part of kingdom
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd[0].id, cls_mtd[1].id);
+
+  // Kingdom contain pet
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, cls_mtd[1].id, cls_mtd[0].id);
+
+  // Pet contain gender
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, cls_mtd[0].id, cls_mtd[2].id);
+
+  /* Query if pet relate kingdom through a IS_PART relation with a maximum
+   * relation span of 1. Max relation span of 1 mean they directly related.*/
+  gboolean exist = gst_analytics_relation_meta_exist (relations, cls_mtd[0].id,
+      cls_mtd[1].id, 1, GST_ANALYTICS_REL_TYPE_IS_PART_OF, NULL);
+  fail_unless (exist == TRUE);
+
+  /* Query if pet relate to gender through a IS_PART relation. */
+  exist = gst_analytics_relation_meta_exist (relations, cls_mtd[0].id,
+      cls_mtd[2].id, 1, GST_ANALYTICS_REL_TYPE_IS_PART_OF, NULL);
+  fail_unless (exist == FALSE);
+
+  /* Query if pet relate to kingdom through a CONTAIN relation. */
+  exist = gst_analytics_relation_meta_exist (relations, cls_mtd[0].id,
+      cls_mtd[1].id, 1, GST_ANALYTICS_REL_TYPE_CONTAIN, NULL);
+  fail_unless (exist == FALSE);
+
+  GstAnalyticsRelTypes cond =
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF | GST_ANALYTICS_REL_TYPE_CONTAIN |
+      GST_ANALYTICS_REL_TYPE_RELATE_TO;
+
+  /* Query if pet relate to gender through IS_PART or CONTAIN or
+   * RELATE_TO relation. */
+  exist = gst_analytics_relation_meta_exist (relations, cls_mtd[0].id,
+      cls_mtd[2].id, 1, cond, NULL);
+  fail_unless (exist == TRUE);
+
+  /* Query if pet relate to kindom through CONTAIN or RELATE_TO relation */
+  cond = GST_ANALYTICS_REL_TYPE_CONTAIN | GST_ANALYTICS_REL_TYPE_RELATE_TO;
+  exist = gst_analytics_relation_meta_exist (relations, cls_mtd[0].id,
+      cls_mtd[1].id, 1, cond, NULL);
+  fail_unless (exist == FALSE);
+
+  /* Query if kingdom relate to gender through a CONTAIN relation with a maximum
+   * relation span of 1. */
+  exist = gst_analytics_relation_meta_exist (relations, cls_mtd[1].id,
+      cls_mtd[2].id, 1, GST_ANALYTICS_REL_TYPE_CONTAIN, NULL);
+
+  /* We expect this to fail because kingdom relate to gender CONTAIN relations
+   * but indirectly (via pet) and we set the max relation span to 1*/
+  fail_unless (exist == FALSE);
+
+  /* Same has previous check but using INFINIT relation span */
+  exist = gst_analytics_relation_meta_exist (relations, cls_mtd[1].id,
+      cls_mtd[2].id, GST_INF_RELATION_SPAN, GST_ANALYTICS_REL_TYPE_CONTAIN,
+      NULL);
+  fail_unless (exist == TRUE);
+
+  exist = gst_analytics_relation_meta_exist (relations, cls_mtd[2].id,
+      cls_mtd[1].id, GST_INF_RELATION_SPAN, GST_ANALYTICS_REL_TYPE_CONTAIN,
+      NULL);
+  fail_unless (exist == FALSE);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_path_relation_meta)
+{
+  /* Verify we can retrieve relation path */
+  GstBuffer *buf;
+  GstAnalyticsClsMtd cls_mtd[3];
+  GstAnalyticsRelationMetaInitParams init_params = { 2, 150 };
+  GstAnalyticsRelationMeta *relations;
+  gboolean ret;
+  GQuark class_quarks[2];
+
+  buf = gst_buffer_new ();
+  relations = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  gfloat conf_lvl[] = { 0.6f, 0.4f };
+  class_quarks[0] = g_quark_from_string ("dog");
+  class_quarks[1] = g_quark_from_string ("cat");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[0]);
+  fail_unless (ret == TRUE);
+  fail_unless (cls_mtd[0].id == 0);
+
+  conf_lvl[0] = 0.6f;
+  conf_lvl[1] = 0.4f;
+  class_quarks[0] = g_quark_from_string ("plant");
+  class_quarks[1] = g_quark_from_string ("animal");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[1]);
+  fail_unless (ret == TRUE);
+  fail_unless (cls_mtd[1].id == 1);
+
+  conf_lvl[0] = 0.6f;
+  conf_lvl[1] = 0.4f;
+  class_quarks[0] = g_quark_from_string ("male");
+  class_quarks[1] = g_quark_from_string ("female");
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[2]);
+  fail_unless (ret == TRUE);
+  fail_unless (cls_mtd[2].id == 2);
+
+  // Pet is part of kingdom
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd[0].id, cls_mtd[1].id);
+
+  // Kingdom contain pet
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, cls_mtd[1].id, cls_mtd[0].id);
+
+  // Pet contain gender
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, cls_mtd[0].id, cls_mtd[2].id);
+
+  GArray *path = NULL;
+  GstAnalyticsRelTypes cond = GST_ANALYTICS_REL_TYPE_CONTAIN;
+  gboolean exist = gst_analytics_relation_meta_exist (relations, cls_mtd[0].id,
+      cls_mtd[2].id, GST_INF_RELATION_SPAN, cond, &path);
+  if (exist) {
+    fail_unless (path != NULL);
+    gint i;
+    guint path_check_ids[] = { 0, 2 };
+    fail_unless (path->len == 2);
+    for (i = 0; i < path->len; i++) {
+      fail_unless (path_check_ids[i] == g_array_index (path, guint, i));
+    }
+    g_array_free (g_steal_pointer (&path), TRUE);
+    fail_unless (i == 2);
+  }
+
+  cond = GST_ANALYTICS_REL_TYPE_CONTAIN;
+  exist = gst_analytics_relation_meta_exist (relations, cls_mtd[1].id,
+      cls_mtd[2].id, GST_INF_RELATION_SPAN, cond, &path);
+  if (exist) {
+    gint i;
+    guint path_check_ids[] = { 1, 0, 2 };
+    fail_unless (path != NULL);
+    fail_unless (path->len == 3);
+    for (i = 0; i < path->len; i++) {
+      fail_unless (path_check_ids[i] == g_array_index (path, guint, i));
+    }
+    g_array_free (g_steal_pointer (&path), TRUE);
+    fail_unless (i == 3);
+  }
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_cyclic_relation_meta)
+{
+  /* Verify we can discover cycle in relation and not report multiple time
+   * the same node and get into an infinit exploration */
+
+  GstBuffer *buf;
+  GstAnalyticsClsMtd cls_mtd[3];
+  GstAnalyticsRelationMetaInitParams init_params = { 2, 150 };
+  GstAnalyticsRelationMeta *relations;
+  gfloat conf_lvl[2];
+  GQuark class_quarks[2];
+
+  class_quarks[0] = g_quark_from_string ("attr1");
+  class_quarks[1] = g_quark_from_string ("attr2");
+
+  buf = gst_buffer_new ();
+  relations = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  conf_lvl[0] = 0.5f;
+  conf_lvl[1] = 0.5f;
+  gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[0]);
+
+  gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[1]);
+
+  gst_analytics_relation_meta_add_cls_mtd (relations, 2, conf_lvl,
+      class_quarks, &cls_mtd[2]);
+
+  // (0) -> (1)
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd[0].id, cls_mtd[1].id);
+
+  // (1)->(2)
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd[1].id, cls_mtd[2].id);
+
+  // (2) -> (0)
+  gst_analytics_relation_meta_set_relation (relations,
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd[2].id, cls_mtd[0].id);
+
+  GArray *path = NULL;
+  GstAnalyticsRelTypes cond = GST_ANALYTICS_REL_TYPE_CONTAIN;
+  gboolean exist = gst_analytics_relation_meta_exist (relations, cls_mtd[0].id,
+      cls_mtd[2].id, GST_INF_RELATION_SPAN, cond, &path);
+  fail_unless (exist == FALSE);
+
+  cond = GST_ANALYTICS_REL_TYPE_IS_PART_OF;
+  exist =
+      gst_analytics_relation_meta_exist (relations, cls_mtd[0].id,
+      cls_mtd[2].id, GST_INF_RELATION_SPAN, cond, &path);
+  fail_unless (exist == TRUE);
+  if (exist) {
+    gint i;
+    guint path_ids[] = { 0, 1, 2 };
+    fail_unless (path->len == 3);
+    for (i = 0; i < path->len; i++) {
+      fail_unless (path_ids[i] == g_array_index (path, guint, i));
+    }
+    g_array_free (g_steal_pointer (&path), TRUE);
+    fail_unless (i == 3);
+  }
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_copy_metas)
+{
+  GstBuffer *buf, *buf2;
+  GstAnalyticsRelationMeta *rmeta, *rmeta2;
+  gboolean ret;
+  GstAnalyticsODMtd od_mtd1, od_mtd2;
+  gpointer state = NULL;
+  GstAnalyticsMtd mtd1, mtd2;
+  gint x, y, w, h;
+  gfloat conf;
+
+  buf = gst_buffer_new ();
+
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  GQuark type = g_quark_from_string ("dog");
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, 10, 10,
+      10, 10, 1.0, &od_mtd1);
+  fail_unless (ret == TRUE);
+
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, 20, 20,
+      20, 20, 1.0, &od_mtd2);
+  fail_unless (ret == TRUE);
+
+  fail_unless_equals_int (gst_analytics_relation_get_length (rmeta), 2);
+
+  ret = gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_RELATE_TO, od_mtd1.id, od_mtd2.id);
+  fail_unless (ret == TRUE);
+
+
+  /* Lets copy it into a new buffer */
+  buf2 = gst_buffer_new ();
+  ret = gst_buffer_copy_into (buf2, buf, GST_BUFFER_COPY_META, 0, -1);
+  fail_unless (ret == TRUE);
+
+  rmeta2 = gst_buffer_get_analytics_relation_meta (buf2);
+  fail_unless (rmeta2 != NULL);
+
+  fail_unless_equals_int (gst_analytics_relation_get_length (rmeta2), 2);
+
+  /* First meta */
+  ret = gst_analytics_relation_meta_iterate (rmeta2, &state,
+      GST_ANALYTICS_MTD_TYPE_ANY, &mtd1);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_int (od_mtd1.id, mtd1.id);
+
+
+  ret = gst_analytics_od_mtd_get_confidence_lvl (&mtd1, &conf);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_float (conf, 1.0);
+
+  ret = gst_analytics_od_mtd_get_location (&mtd1, &x, &y, &w, &h, &conf);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_int (x, 10);
+  fail_unless_equals_int (y, 10);
+  fail_unless_equals_int (w, 10);
+  fail_unless_equals_int (h, 10);
+
+  /* Second meta */
+  ret = gst_analytics_relation_meta_iterate (rmeta2, &state,
+      GST_ANALYTICS_MTD_TYPE_ANY, &mtd2);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_int (od_mtd2.id, mtd2.id);
+
+  ret = gst_analytics_od_mtd_get_confidence_lvl (&mtd2, &conf);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_float (conf, 1.0);
+
+  ret = gst_analytics_od_mtd_get_location (&mtd2, &x, &y, &w, &h, &conf);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_int (x, 20);
+  fail_unless_equals_int (y, 20);
+  fail_unless_equals_int (w, 20);
+  fail_unless_equals_int (h, 20);
+
+  fail_unless_equals_int (gst_analytics_relation_meta_get_relation (rmeta,
+          mtd1.id, mtd2.id), GST_ANALYTICS_REL_TYPE_RELATE_TO);
+
+  /* No third meta */
+  ret = gst_analytics_relation_meta_iterate (rmeta2, &state,
+      GST_ANALYTICS_MTD_TYPE_ANY, &mtd1);
+  fail_unless (ret == FALSE);
+
+  gst_buffer_unref (buf);
+  gst_buffer_unref (buf2);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_od_meta)
+{
+  /* Verity we can add Object Detection relatable metadata to a relation
+   * metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsODMtd od_mtd;
+  gboolean ret;
+  buf = gst_buffer_new ();
+
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  GQuark type = g_quark_from_string ("dog");
+  gint x = 20;
+  gint y = 20;
+  gint w = 10;
+  gint h = 15;
+  gfloat loc_conf_lvl = 0.6f;
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, x, y,
+      w, h, loc_conf_lvl, &od_mtd);
+  fail_unless (ret == TRUE);
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_oriented_od_meta)
+{
+  /* Verity we can add Oriented Object Detection relatable metadata to a relation
+   * metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsODMtd od_mtd;
+  gboolean ret;
+  buf = gst_buffer_new ();
+
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  GQuark type = g_quark_from_string ("dog");
+  gint x = 20;
+  gint y = 20;
+  gint w = 10;
+  gint h = 15;
+  gfloat r = 0.785f;
+  gfloat loc_conf_lvl = 0.6f;
+  ret = gst_analytics_relation_meta_add_oriented_od_mtd (rmeta, type, x, y,
+      w, h, r, loc_conf_lvl, &od_mtd);
+  fail_unless (ret == TRUE);
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_od_meta_fields)
+{
+  /* Verify we can readback fields of object detection metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsODMtd od_mtd;
+  gboolean ret;
+  buf = gst_buffer_new ();
+
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  GQuark type = g_quark_from_string ("dog");
+  gint x = 21;
+  gint y = 20;
+  gint w = 10;
+  gint h = 15;
+  gfloat loc_conf_lvl = 0.6f;
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, x, y,
+      w, h, loc_conf_lvl, &od_mtd);
+
+  fail_unless (ret == TRUE);
+
+  gint _x, _y, _w, _h;
+  gfloat _loc_conf_lvl;
+  gst_analytics_od_mtd_get_location (&od_mtd, &_x, &_y, &_w, &_h,
+      &_loc_conf_lvl);
+
+  fail_unless (_x == x);
+  fail_unless (_y == y);
+  fail_unless (_w == w);
+  fail_unless (_h == h);
+  fail_unless (_loc_conf_lvl == loc_conf_lvl);
+
+  _loc_conf_lvl = -200.0;       // dirty this var by setting invalid value.
+  gst_analytics_od_mtd_get_confidence_lvl (&od_mtd, &_loc_conf_lvl);
+
+  fail_unless (_loc_conf_lvl == loc_conf_lvl);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_oriented_od_meta_fields)
+{
+  /* Verify we can readback fields of object detection metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsODMtd od_mtd;
+  gboolean ret;
+  buf = gst_buffer_new ();
+
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  GQuark type = g_quark_from_string ("dog");
+  gint x = 21;
+  gint y = 20;
+  gint w = 10;
+  gint h = 15;
+  gfloat r = 0.785f;
+  gfloat loc_conf_lvl = 0.6f;
+  ret = gst_analytics_relation_meta_add_oriented_od_mtd (rmeta, type, x, y,
+      w, h, r, loc_conf_lvl, &od_mtd);
+
+  fail_unless (ret == TRUE);
+
+  gint _x, _y, _w, _h;
+  gfloat _r, _loc_conf_lvl;
+  gst_analytics_od_mtd_get_oriented_location (&od_mtd, &_x, &_y, &_w, &_h, &_r,
+      &_loc_conf_lvl);
+
+  fail_unless (_x == x);
+  fail_unless (_y == y);
+  fail_unless (_w == w);
+  fail_unless (_h == h);
+  fail_unless (_r == r);
+  fail_unless (_loc_conf_lvl == loc_conf_lvl);
+
+  _loc_conf_lvl = -200.0;       // dirty this var by setting invalid value.
+  gst_analytics_od_mtd_get_confidence_lvl (&od_mtd, &_loc_conf_lvl);
+
+  fail_unless (_loc_conf_lvl == loc_conf_lvl);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_non_oriented_get_oriented_od_meta_fields)
+{
+  /* Verify we can readback fields of object detection metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsODMtd od_mtd;
+  gboolean ret;
+  buf = gst_buffer_new ();
+
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  GQuark type = g_quark_from_string ("dog");
+  gint x = 21;
+  gint y = 20;
+  gint w = 10;
+  gint h = 15;
+  gfloat loc_conf_lvl = 0.6f;
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, x, y,
+      w, h, loc_conf_lvl, &od_mtd);
+
+  fail_unless (ret == TRUE);
+
+  gint _x, _y, _w, _h;
+  gfloat _r, _loc_conf_lvl;
+  gst_analytics_od_mtd_get_oriented_location (&od_mtd, &_x, &_y, &_w, &_h, &_r,
+      &_loc_conf_lvl);
+
+  fail_unless (_x == x);
+  fail_unless (_y == y);
+  fail_unless (_w == w);
+  fail_unless (_h == h);
+  fail_unless (_r == 0);
+  fail_unless (_loc_conf_lvl == loc_conf_lvl);
+
+  _loc_conf_lvl = -200.0;       // dirty this var by setting invalid value.
+  gst_analytics_od_mtd_get_confidence_lvl (&od_mtd, &_loc_conf_lvl);
+
+  fail_unless (_loc_conf_lvl == loc_conf_lvl);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_oriented_get_non_oriented_od_meta_fields)
+{
+  /* Verify we can readback fields of object detection metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsODMtd od_mtd;
+  gboolean ret;
+  gint _x, _y, _w, _h;
+  gfloat _loc_conf_lvl;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  struct
+  {
+    gint x, y, w, h;
+    gfloat r;
+    gint expected_x, expected_y, expected_w, expected_h;
+  } test_cases[] = {
+    {500, 300, 200, 100, 0.0f, 500, 300, 200, 100},
+    {600, 400, 200, 100, 0.785f, 594, 344, 212, 212},
+    {400, 400, 150, 100, 1.570f, 425, 375, 100, 150},
+    {400, 300, 200, 100, 2.268f, 397, 241, 206, 218},
+    {400, 400, 200, 100, 3.142f, 400, 400, 200, 100},
+    {300, 300, 150, 100, 4.712f, 325, 275, 100, 150},
+    {500, 400, 1, 100, 0.785f, 465, 415, 71, 71},
+    {400, 500, 100, 1, 2.268f, 417, 461, 65, 77},
+    {400, 400, 100, 100, 6.283f, 400, 400, 100, 100},
+  };
+
+  gfloat loc_conf_lvl = 0.9f;
+  for (gsize i = 0; i < G_N_ELEMENTS (test_cases); i++) {
+    gint x = test_cases[i].x;
+    gint y = test_cases[i].y;
+    gint w = test_cases[i].w;
+    gint h = test_cases[i].h;
+    gfloat r = test_cases[i].r;
+
+    gint expected_x = test_cases[i].expected_x;
+    gint expected_y = test_cases[i].expected_y;
+    gint expected_w = test_cases[i].expected_w;
+    gint expected_h = test_cases[i].expected_h;
+
+    ret =
+        gst_analytics_relation_meta_add_oriented_od_mtd (rmeta,
+        g_quark_from_string ("dog"), x, y, w, h, r, loc_conf_lvl, &od_mtd);
+    fail_unless (ret == TRUE);
+
+    gst_analytics_od_mtd_get_location (&od_mtd, &_x, &_y, &_w, &_h,
+        &_loc_conf_lvl);
+
+    fail_unless (_x == expected_x);
+    fail_unless (_y == expected_y);
+    fail_unless (_w == expected_w);
+    fail_unless (_h == expected_h);
+    fail_unless (_loc_conf_lvl == loc_conf_lvl);
+  }
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_od_cls_relation)
+{
+  /* Verify we can add a object detection and classification metadata to
+   * a relation metadata */
+
+  GstBuffer *buf;
+  GstAnalyticsClsMtd cls_mtd;
+  GstAnalyticsODMtd od_mtd;
+  /* We intentionally set buffer small than required to verify sanity
+   * with re-allocation */
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  gboolean ret;
+  GArray *path = NULL;
+  gboolean exist;
+  gint _x, _y, _w, _h;
+  gfloat _loc_conf_lvl;
+  GQuark class_quarks[2];
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  gfloat conf_lvl[] = { 0.7f, 0.3f };
+  class_quarks[0] = g_quark_from_string ("dog");
+  class_quarks[1] = g_quark_from_string ("cat");
+
+  gst_analytics_relation_meta_add_cls_mtd (rmeta, 2, conf_lvl,
+      class_quarks, &cls_mtd);
+
+  GQuark type = g_quark_from_string ("dog");
+  gint x = 21;
+  gint y = 20;
+  gint w = 10;
+  gint h = 15;
+  gfloat loc_conf_lvl = 0.6f;
+  gst_analytics_relation_meta_add_od_mtd (rmeta, type, x, y, w, h,
+      loc_conf_lvl, &od_mtd);
+
+  ret = gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, od_mtd.id, cls_mtd.id);
+  fail_unless (ret == TRUE);
+
+  ret = gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF, cls_mtd.id, od_mtd.id);
+  fail_unless (ret == TRUE);
+
+  /* Verify OD relate to CLS only through a CONTAIN relation */
+  exist = gst_analytics_relation_meta_exist (rmeta,
+      od_mtd.id, cls_mtd.id, GST_INF_RELATION_SPAN,
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF, NULL);
+  fail_unless (exist == FALSE);
+
+  exist = gst_analytics_relation_meta_exist (rmeta,
+      od_mtd.id, cls_mtd.id, GST_INF_RELATION_SPAN,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, &path);
+  fail_unless (exist == TRUE);
+
+  /* Query the relation path and verify it is correct */
+  guint ids[2];
+  gint i;
+  fail_unless (path->len == 2);
+  for (i = 0; i < path->len; i++) {
+    ids[i] = g_array_index (path, guint, i);
+    GST_LOG ("id=%u", ids[i]);
+  }
+  g_array_free (g_steal_pointer (&path), TRUE);
+  fail_unless (ids[0] == 1);
+  fail_unless (ids[1] == 0);
+
+  GstAnalyticsMtd rlt_mtd;
+  exist = gst_analytics_relation_meta_get_mtd (rmeta, ids[0], 0, &rlt_mtd);
+  fail_unless (exist == TRUE);
+
+  GstAnalyticsMtdType mtd_type = gst_analytics_mtd_get_mtd_type (&rlt_mtd);
+
+  /* Verify relatable meta with id == 1 is of type Object Detection */
+  fail_unless (mtd_type == gst_analytics_od_mtd_get_mtd_type ());
+
+  gst_analytics_od_mtd_get_location ((GstAnalyticsODMtd *) & rlt_mtd, &_x, &_y,
+      &_w, &_h, &_loc_conf_lvl);
+  fail_unless (_x == x);
+  fail_unless (_y == y);
+  fail_unless (_w == w);
+  fail_unless (_h == h);
+  fail_unless (_loc_conf_lvl == loc_conf_lvl);
+
+  GST_LOG ("mtd_type:%s", gst_analytics_mtd_type_get_name (mtd_type));
+
+  exist = gst_analytics_relation_meta_get_mtd (rmeta, ids[1], 0, &rlt_mtd);
+  fail_unless (exist == TRUE);
+  mtd_type = gst_analytics_mtd_get_mtd_type (&rlt_mtd);
+
+  /* Verify relatable meta with id == 0 is of type classification */
+  fail_unless (mtd_type == gst_analytics_cls_mtd_get_mtd_type ());
+  gint index =
+      gst_analytics_cls_mtd_get_index_by_quark ((GstAnalyticsClsMtd *) &
+      rlt_mtd,
+      g_quark_from_string ("dog"));
+  gfloat lvl =
+      gst_analytics_cls_mtd_get_level ((GstAnalyticsClsMtd *) & rlt_mtd, index);
+  GST_LOG ("dog %f [%d, %d %d, %d", lvl, _x, _y, _w, _h);
+
+  fail_unless (lvl == 0.7f);
+  index =
+      gst_analytics_cls_mtd_get_index_by_quark ((GstAnalyticsClsMtd *) &
+      rlt_mtd, g_quark_from_string ("cat"));
+  lvl =
+      gst_analytics_cls_mtd_get_level ((GstAnalyticsClsMtd *) & rlt_mtd, index);
+  fail_unless (lvl == 0.3f);
+
+  GST_LOG ("mtd_type:%s", gst_analytics_mtd_type_get_name (mtd_type));
+  GST_LOG ("cat %f [%d, %d %d, %d", lvl, _x, _y, _w, _h);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_multi_od_cls_relation)
+{
+  GstBuffer *buf;
+  GstAnalyticsClsMtd cls_mtd[3];
+  GstAnalyticsODMtd od_mtd[2];
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  guint cls_id, ids[2], i;
+  gboolean ret;
+  const gint dog_cls_index = 0;
+  const gint cat_cls_index = 1;
+  gfloat cls_conf_lvl[2], lvl;
+  GArray *path = NULL;
+  gfloat _loc_conf_lvl;
+  gint x, _x, y, _y, w, _w, h, _h;
+  GstAnalyticsMtdType mtd_type;
+  GQuark cls_type;
+  GstAnalyticsMtd mtd;
+  gpointer state = NULL;
+  GQuark class_quarks[2];
+  class_quarks[0] = g_quark_from_string ("dog");
+  class_quarks[1] = g_quark_from_string ("cat");
+
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf, &init_params);
+
+  /* Define first relation ObjectDetection -contain-> Classification */
+  cls_conf_lvl[dog_cls_index] = 0.7f;
+  cls_conf_lvl[cat_cls_index] = 0.3f;
+
+  gst_analytics_relation_meta_add_cls_mtd (rmeta, 2, cls_conf_lvl,
+      class_quarks, &cls_mtd[0]);
+
+  cls_type = g_quark_from_string ("dog");
+  x = 21;
+  y = 20;
+  w = 10;
+  h = 15;
+  gfloat loc_conf_lvl = 0.6f;
+  gst_analytics_relation_meta_add_od_mtd (rmeta, cls_type, x, y, w,
+      h, loc_conf_lvl, &od_mtd[0]);
+
+  ret = gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, od_mtd[0].id, cls_mtd[0].id);
+  fail_unless (ret == TRUE);
+  GST_LOG ("Set rel Obj:%d -c-> Cls:%d", od_mtd[0].id, cls_mtd[0].id);
+
+  /* Define second relation ObjectDetection -contain-> Classification */
+  cls_conf_lvl[dog_cls_index] = 0.1f;
+  cls_conf_lvl[cat_cls_index] = 0.9f;
+  gst_analytics_relation_meta_add_cls_mtd (rmeta, 2, cls_conf_lvl,
+      class_quarks, &cls_mtd[1]);
+
+  cls_type = g_quark_from_string ("cat");
+  x = 50;
+  y = 21;
+  w = 11;
+  h = 16;
+  loc_conf_lvl = 0.7f;
+  gst_analytics_relation_meta_add_od_mtd (rmeta, cls_type, x, y, w,
+      h, loc_conf_lvl, &od_mtd[1]);
+
+  ret = gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, od_mtd[1].id, cls_mtd[1].id);
+
+  GST_LOG ("Set rel Obj:%d -c-> Cls:%d", od_mtd[1].id, cls_mtd[1].id);
+  fail_unless (ret == TRUE);
+
+  /* Query relations */
+
+  /* Query relation between first object detection and first classification
+   * and verify they are only related by CONTAIN relation OD relate to
+   * CLASSIFICATION through a CONTAIN relation. */
+  gboolean exist =
+      gst_analytics_relation_meta_exist (rmeta, od_mtd[0].id, cls_mtd[0].id,
+      GST_INF_RELATION_SPAN,
+      GST_ANALYTICS_REL_TYPE_IS_PART_OF, NULL);
+  fail_unless (exist == FALSE);
+
+  exist =
+      gst_analytics_relation_meta_exist (rmeta, od_mtd[0].id, cls_mtd[0].id,
+      GST_INF_RELATION_SPAN, GST_ANALYTICS_REL_TYPE_CONTAIN, NULL);
+  fail_unless (exist == TRUE);
+
+
+  /* Query relation between second object detection and second classification
+   * and verify they are only related by CONTAIN relation OD relate to
+   * CLASSIFICATION through a CONTAIN relation.
+   */
+  exist =
+      gst_analytics_relation_meta_exist (rmeta, od_mtd[1].id, cls_mtd[1].id,
+      GST_INF_RELATION_SPAN, GST_ANALYTICS_REL_TYPE_CONTAIN, &path);
+  fail_unless (exist == TRUE);
+
+  /* Verify relation path between OD second (id=3) and Cls second (id=2)
+   * is correct
+   */
+  fail_unless (path->len == 2);
+  for (i = 0; i < path->len; i++) {
+    ids[i] = g_array_index (path, guint, i);
+    GST_LOG ("id=%u", ids[i]);
+  }
+  g_array_free (g_steal_pointer (&path), TRUE);
+  fail_unless (ids[0] == 3);
+  fail_unless (ids[1] == 2);
+
+  /* Verify the relatable metadata 3 is of correct type
+   * (ObjectDetection). Verify it describe the correct
+   * the correct data.
+   */
+  gst_analytics_relation_meta_get_mtd (rmeta, ids[0], 0, &mtd);
+  mtd_type = gst_analytics_mtd_get_mtd_type (&mtd);
+  fail_unless (mtd_type == gst_analytics_od_mtd_get_mtd_type ());
+
+  gst_analytics_od_mtd_get_location ((GstAnalyticsODMtd *) & mtd, &_x, &_y, &_w,
+      &_h, &_loc_conf_lvl);
+  fail_unless (_x == 50);
+  fail_unless (_y == 21);
+  fail_unless (_w == 11);
+  fail_unless (_h == 16);
+  fail_unless (_loc_conf_lvl == 0.7f);
+
+  GST_LOG ("mtd_type:%s", gst_analytics_mtd_type_get_name (mtd_type));
+
+  /* Verify the relatable metadata 2 is of correct type
+   * (ObjectDetection).
+   */
+  gst_analytics_relation_meta_get_mtd (rmeta, ids[1], 0, &mtd);
+  mtd_type = gst_analytics_mtd_get_mtd_type (&mtd);
+  fail_unless (mtd_type == gst_analytics_cls_mtd_get_mtd_type ());
+
+  /* Verify data of the CLASSIFICATION retrieved */
+  gint index =
+      gst_analytics_cls_mtd_get_index_by_quark ((GstAnalyticsClsMtd *) & mtd,
+      g_quark_from_string ("dog"));
+  lvl = gst_analytics_cls_mtd_get_level ((GstAnalyticsClsMtd *) & mtd, index);
+  GST_LOG ("dog %f [%d, %d %d, %d", lvl, _x, _y, _w, _h);
+  fail_unless (lvl == 0.1f);
+
+  /* Verify data of the CLASSIFICATION retrieved */
+  index =
+      gst_analytics_cls_mtd_get_index_by_quark ((GstAnalyticsClsMtd *) & mtd,
+      g_quark_from_string ("cat"));
+  lvl = gst_analytics_cls_mtd_get_level ((GstAnalyticsClsMtd *) & mtd, index);
+  GST_LOG ("mtd_type:%s", gst_analytics_mtd_type_get_name (mtd_type));
+  GST_LOG ("cat %f [%d, %d %d, %d", lvl, _x, _y, _w, _h);
+  fail_unless (lvl == 0.9f);
+
+  /* Retrieve relatable metadata related to the first object detection
+   * through a CONTAIN relation of type CLASSIFICATION
+   * Verify it's the first classification metadata
+   */
+  gst_analytics_relation_meta_get_direct_related (rmeta, od_mtd[0].id,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, gst_analytics_cls_mtd_get_mtd_type (),
+      &state, &mtd);
+
+  cls_id = gst_analytics_mtd_get_id (&mtd);
+  GST_LOG ("Obj:%d -> Cls:%d", od_mtd[0].id, cls_id);
+  fail_unless (cls_id == cls_mtd[0].id);
+
+  state = NULL;
+  /* Retrieve relatable metadata related to the second object detection
+   * through a CONTAIN relation of type CLASSIFICATION
+   * Verify it's the first classification metadata
+   */
+  gst_analytics_relation_meta_get_direct_related (rmeta, od_mtd[1].id,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, gst_analytics_cls_mtd_get_mtd_type (),
+      &state, &mtd);
+  cls_id = gst_analytics_mtd_get_id (&mtd);
+
+  GST_LOG ("Obj:%d -> Cls:%d", od_mtd[1].id, cls_id);
+  fail_unless (cls_id == cls_mtd[1].id);
+
+  cls_conf_lvl[dog_cls_index] = 0.2f;
+  cls_conf_lvl[cat_cls_index] = 0.8f;
+  class_quarks[0] = g_quark_from_string ("canine");
+  class_quarks[1] = g_quark_from_string ("feline");
+  gst_analytics_relation_meta_add_cls_mtd (rmeta, 2, cls_conf_lvl,
+      class_quarks, &cls_mtd[2]);
+
+  ret = gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, od_mtd[1].id, cls_mtd[2].id);
+
+  state = NULL;
+  ret = gst_analytics_relation_meta_get_direct_related (rmeta, od_mtd[1].id,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, gst_analytics_od_mtd_get_mtd_type (),
+      &state, &mtd);
+
+  fail_unless (ret == FALSE);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_tracking_meta)
+{
+  /* Verify we can add tracking relatable meta to relation meta */
+  GstBuffer *buf1, *buf2;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsTrackingMtd tracking_mtd, tracking_mtd2;
+  guint64 tracking_id, ret_trk_id;
+  GstClockTime time_1, time_2, time_ret_f, time_ret_l;
+  gboolean ret, found = FALSE, lost;
+  gpointer state = NULL;
+
+  /* Verify we can add multiple trackings to relation metadata
+   */
+
+  buf1 = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf1, &init_params);
+  tracking_id = 1;
+  time_1 = GST_BUFFER_TIMESTAMP (buf1);
+  ret = gst_analytics_relation_meta_add_tracking_mtd (rmeta, tracking_id,
+      time_1, &tracking_mtd);
+  fail_unless (ret == TRUE);
+
+  gst_buffer_unref (buf1);
+
+  buf2 = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf2, &init_params);
+  tracking_id = 1;
+  ret = gst_analytics_relation_meta_add_tracking_mtd (rmeta, tracking_id,
+      time_1, &tracking_mtd);
+  fail_unless (ret == TRUE);
+
+  /* add itermadiate tracking point to very first and last are correct */
+  time_2 = GST_BUFFER_TIMESTAMP (buf2) + 1;
+  ret = gst_analytics_tracking_mtd_update_last_seen (&tracking_mtd, time_2);
+
+  /* add last tracking point */
+  time_2 += 1;
+  ret = gst_analytics_tracking_mtd_update_last_seen (&tracking_mtd, time_2);
+
+  /* Verify we can retrieve tracking mtd */
+  found = gst_analytics_relation_meta_iterate (rmeta, &state,
+      GST_ANALYTICS_MTD_TYPE_ANY, &tracking_mtd2);
+
+  /* Verify retrieved mtd is correct */
+  fail_unless (found == TRUE);
+  fail_unless (tracking_mtd2.id == tracking_mtd.id);
+  fail_unless (tracking_mtd2.meta == tracking_mtd.meta);
+
+  /* Verify specific tracking mtd data */
+  gst_analytics_tracking_mtd_get_info (&tracking_mtd2, &ret_trk_id, &time_ret_f,
+      &time_ret_l, &lost);
+  fail_unless (tracking_id == ret_trk_id);
+  fail_unless (time_1 == time_ret_f);
+  fail_unless (time_2 == time_ret_l);
+  fail_unless (lost == FALSE);
+
+  /* Set tracking lost */
+  gst_analytics_tracking_mtd_set_lost (&tracking_mtd);
+
+  /* Verify tracking lost was updated but other tracking data are still
+   * available */
+  gst_analytics_tracking_mtd_get_info (&tracking_mtd2, &ret_trk_id, &time_ret_f,
+      &time_ret_l, &lost);
+
+  fail_unless (tracking_id == ret_trk_id);
+  fail_unless (time_1 == time_ret_f);
+  fail_unless (time_2 == time_ret_l);
+  fail_unless (lost == TRUE);
+
+  gst_buffer_unref (buf2);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_od_trk_relation)
+{
+  /* Verify we retrive tracking from relation with OD */
+  GstBuffer *buf1;
+  guint64 tracking_id;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsTrackingMtd tracking_mtd, tracking_mtd2;
+  GstClockTime tracking_observation_time_1;
+  gboolean ret, found = FALSE;
+  gpointer state = NULL;
+  GQuark type = g_quark_from_string ("dog");
+  gint x = 20;
+  gint y = 20;
+  gint w = 10;
+  gint h = 15;
+  gfloat loc_conf_lvl = 0.6f;
+  GstAnalyticsODMtd od_mtd, od_mtd2;
+
+
+  /* creating a buffer where we add a relation-meta */
+  buf1 = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta_full (buf1, &init_params);
+  tracking_id = 1;
+  tracking_observation_time_1 = GST_BUFFER_TIMESTAMP (buf1);
+  ret = gst_analytics_relation_meta_add_tracking_mtd (rmeta, tracking_id,
+      tracking_observation_time_1, &tracking_mtd);
+  fail_unless (ret == TRUE);
+
+  /* adding object-detection to rmeta */
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, x, y,
+      w, h, loc_conf_lvl, &od_mtd);
+
+  /* set relation from object-detection to tracking */
+  gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_RELATE_TO, od_mtd.id, tracking_mtd.id);
+
+  /* query for related mtd of any type on od_mtd */
+  found = gst_analytics_relation_meta_get_direct_related (rmeta, od_mtd.id,
+      GST_ANALYTICS_REL_TYPE_RELATE_TO, GST_ANALYTICS_MTD_TYPE_ANY, &state,
+      &tracking_mtd2);
+
+  fail_unless (found == TRUE);
+  fail_unless (tracking_mtd2.id == tracking_mtd.id);
+  fail_unless (tracking_mtd2.meta == tracking_mtd.meta);
+
+  state = NULL;
+  /* query for related mtd of any type on tracking. */
+  found = gst_analytics_relation_meta_get_direct_related (rmeta,
+      tracking_mtd.id, GST_ANALYTICS_REL_TYPE_RELATE_TO,
+      GST_ANALYTICS_MTD_TYPE_ANY, &state, &od_mtd2);
+
+  /* since relation are directed and we only set a relation from
+   * object-detection to tracking, we shouldn't find any relation */
+  fail_unless (found == FALSE);
+
+  /* set relation from tracking to object-detection */
+  gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_RELATE_TO, tracking_mtd.id, od_mtd.id);
+
+  state = NULL;
+  /* query for related mtd of any type on tracking. */
+  found = gst_analytics_relation_meta_get_direct_related (rmeta,
+      tracking_mtd.id, GST_ANALYTICS_REL_TYPE_RELATE_TO,
+      GST_ANALYTICS_MTD_TYPE_ANY, &state, &od_mtd2);
+
+  /* now we should find as it was added */
+  fail_unless (found == TRUE);
+  fail_unless (od_mtd2.id == od_mtd.id);
+  fail_unless (od_mtd2.meta == od_mtd.meta);
+
+  gst_buffer_unref (buf1);
+}
+
+GST_END_TEST;
+
+
+GST_START_TEST (test_verify_mtd_clear)
+{
+  /* This test use segmentation mtd but it's a general functionality of
+   * analytics-meta that _mtd_clear is called when buffer is freed.
+   * _mtd_clear should be called regardless if the buffer where relation-meta
+   * is attached is from a pool or not. This test verify that _mtd_clear is
+   * called when buffer where relation-meta is attached it not from a pool.
+   */
+  GstBuffer *vbuf, *mbuf;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstBufferPool *mpool;
+  GstCaps *caps;
+  GstStructure *config;
+  GstVideoInfo minfo;
+  GstAnalyticsSegmentationMtd smtd;
+  GstBufferPoolAcquireParams pool_acq_params = { 0, };
+  pool_acq_params.flags = GST_BUFFER_POOL_ACQUIRE_FLAG_DONTWAIT;
+
+  vbuf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta_full (vbuf, &init_params);
+
+  /* Create pool for segmentation masks */
+  gst_video_info_init (&minfo);
+  gst_video_info_set_format (&minfo, GST_VIDEO_FORMAT_GRAY8, 32, 32);
+  caps = gst_video_info_to_caps (&minfo);
+  mpool = gst_video_buffer_pool_new ();
+  config = gst_buffer_pool_get_config (mpool);
+
+  /* Here we intentionnaly create a pool of only one element to validate the
+   * buffer used to store the masks is returned to the pool when the video
+   * buffer to which it is attached is unreffed with the intention of having
+   * gst_buffer_pool_acquire_buffer (mpool,...) fail if it didn't happen.*/
+  gst_buffer_pool_config_set_params (config, caps, minfo.size, 0, 1);
+  gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+  gst_buffer_pool_set_config (mpool, config);
+  gst_buffer_pool_set_active (mpool, TRUE);
+  gst_caps_unref (caps);
+
+  fail_unless (gst_buffer_pool_acquire_buffer (mpool, &mbuf,
+          &pool_acq_params) == GST_FLOW_OK);
+
+  /* Here we pretend the masks contain 2 region types [2,3] */
+  static const gsize region_count = 2;
+  guint region_ids[] = { 2, 3 };
+
+  gst_analytics_relation_meta_add_segmentation_mtd (rmeta, mbuf,
+      GST_SEGMENTATION_TYPE_INSTANCE, region_count, region_ids, 0, 0, 0, 0,
+      &smtd);
+
+  /* This _unref will dispose vbuf and also mbuf to mpool
+   * because GstAnalyticsSegmentationMtd define a
+   * GstAnalyticsMtdImpl::mtd_meta_clear */
+  gst_buffer_unref (vbuf);
+
+  /* This will succeed because mbuf was returned to the pool. If this
+   * test fail it highlight a memory managemnt failure in analytics-meta.*/
+  fail_unless (gst_buffer_pool_acquire_buffer (mpool, &mbuf,
+          &pool_acq_params) == GST_FLOW_OK);
+
+  gst_buffer_unref (mbuf);
+  gst_buffer_pool_set_active (mpool, FALSE);
+  gst_object_unref (mpool);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_segmentation_meta)
+{
+  /*
+   * This a very simple test that add a segmentation analytics-meta
+   * to a buffer. In this test the masks have the same resolution as
+   * the buffer. It verify that masks (GstBuffer) memory management by
+   * validating the GstBuffer was returned to the pool by
+   */
+  GstBuffer *vbuf, *mbuf;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstBufferPool *vpool, *mpool;
+  GstCaps *caps;
+  GstStructure *config;
+  GstVideoInfo vinfo, minfo;
+  GstAnalyticsSegmentationMtd smtd;
+
+  /* Create a pool for video frames */
+  gst_video_info_init (&vinfo);
+  vpool = gst_video_buffer_pool_new ();
+  config = gst_buffer_pool_get_config (vpool);
+  gst_video_info_set_format (&vinfo, GST_VIDEO_FORMAT_RGBA, 32, 32);
+  caps = gst_video_info_to_caps (&vinfo);
+  gst_buffer_pool_config_set_params (config, caps, vinfo.size, 0, 0);
+  gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+  gst_buffer_pool_set_config (vpool, config);
+  gst_buffer_pool_set_active (vpool, TRUE);
+  gst_caps_unref (caps);
+
+  fail_unless (gst_buffer_pool_acquire_buffer (vpool, &vbuf, NULL) ==
+      GST_FLOW_OK);
+
+  rmeta = gst_buffer_add_analytics_relation_meta_full (vbuf, &init_params);
+
+  /* Create pool for segmentation masks */
+  gst_video_info_init (&minfo);
+  gst_video_info_set_format (&minfo, GST_VIDEO_FORMAT_GRAY8, 32, 32);
+  caps = gst_video_info_to_caps (&minfo);
+  mpool = gst_video_buffer_pool_new ();
+  config = gst_buffer_pool_get_config (mpool);
+
+  /* Here we intentionnaly create a pool of only one element to validate the
+   * buffer used to store the masks is returned to the pool when the video
+   * buffer to which it is attached is unreffed with the intention of having
+   * gst_buffer_pool_acquire_buffer (mpool,...) fail if it didn't happen.*/
+  gst_buffer_pool_config_set_params (config, caps, minfo.size, 0, 1);
+  gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+  gst_buffer_pool_set_config (mpool, config);
+  gst_buffer_pool_set_active (mpool, TRUE);
+  gst_caps_unref (caps);
+
+  fail_unless (gst_buffer_pool_acquire_buffer (mpool, &mbuf, NULL) ==
+      GST_FLOW_OK);
+
+  /* Here we pretend the masks contain 2 region types [2,3] */
+  static const gsize region_count = 2;
+  guint region_ids[] = { 2, 3 };
+
+  gst_analytics_relation_meta_add_segmentation_mtd (rmeta, mbuf,
+      GST_SEGMENTATION_TYPE_INSTANCE, region_count, region_ids, 0, 0, 0, 0,
+      &smtd);
+
+  /* This _unref will return vbuf to vpool and also mbuf to mpool
+   * because GstAnalyticsSegmentationMtd define a
+   * GstAnalyticsMtdImpl::mtd_meta_clear */
+  gst_buffer_unref (vbuf);
+
+  /* This will succeed because mbuf was returned to the pool. If this
+   * test fail it highlight a memory managemnt failure in analytics-meta.*/
+  fail_unless (gst_buffer_pool_acquire_buffer (mpool, &mbuf, NULL) ==
+      GST_FLOW_OK);
+
+  gst_buffer_unref (mbuf);
+  gst_buffer_pool_set_active (mpool, FALSE);
+  gst_object_unref (mpool);
+  gst_buffer_pool_set_active (vpool, FALSE);
+  gst_object_unref (vpool);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_associate_segmentation_meta)
+{
+  /* This test verify that classification can be associated to segmentation.
+   * More specifically we use a grayscale image that contain 2 set of
+   * imbricated pattern. The segmentation problem is simplified by having a
+   * specific value for each region. In a sense the original image is already
+   * segmented to avoid to do a real segmentation, since the goal of this test
+   * is to very segmentation analytics-meta API.
+   *
+   * Original image: 32x24 grayscale
+   * Segmentation input: 16x16 grayscale
+   * Segmentation output: 16x16 tensor (where each value correspond to a region
+   * id in the input)
+   */
+
+  GstBuffer *vbuf, *mbuf;
+  GstAnalyticsRelationMetaInitParams init_params = { 5, 150 };
+  GstAnalyticsRelationMeta *rmeta;
+  GstBufferPool *vpool, *mpool;
+  GstCaps *caps;
+  GstStructure *config;
+  GstVideoInfo vinfo, minfo;
+  GstAnalyticsSegmentationMtd smtd;
+  GstAnalyticsClsMtd clsmtd;
+
+  /* Create a pool for video frames */
+  gst_video_info_init (&vinfo);
+  vpool = gst_video_buffer_pool_new ();
+  config = gst_buffer_pool_get_config (vpool);
+  gst_video_info_set_format (&vinfo, GST_VIDEO_FORMAT_GRAY8, 32, 24);
+  caps = gst_video_info_to_caps (&vinfo);
+  gst_buffer_pool_config_set_params (config, caps, vinfo.size, 0, 0);
+  gst_buffer_pool_set_config (vpool, config);
+  gst_buffer_pool_set_active (vpool, TRUE);
+  gst_caps_unref (caps);
+
+  fail_unless (gst_buffer_pool_acquire_buffer (vpool, &vbuf, NULL) ==
+      GST_FLOW_OK);
+
+  /* This image a 32 x 24, GRAY8  that contain  └ and ┐ that are imbricated.
+   * └ is formed by pixels values of: 9 and 7.
+   * ┐ is formed by pixels values of: 8 and 6.
+   * 9 and 8 are imbricated and 7 and 6 are impbricated. Pixel values [6,7,8,9],
+   * have no importance.
+   */
+
+  guint8 img[] = {
+    /*        0|0|0|0|0|0|0|0|0|0|1|1|1|1|1|1|1|1|1|1|2|2|2|2|2|2|2|2|2|2|3|3  */
+    /*        0|1|2|3|4|5|6|7|8|9|0|1|2|3|4|5|6|7|8|9|0|1|2|3|4|5|6|7|8|9|0|1  */
+    /* 0  */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 1  */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 2  */ 0, 0, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 3  */ 0, 0, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 4  */ 0, 0, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 5  */ 0, 0, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 6  */ 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 7  */ 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 8  */ 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 9  */ 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 10 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 11 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 12 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 6, 6,
+    6, 6, 6, 6, 6, 6, 0, 0, 0, 0,
+    /* 13 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 6, 6,
+    6, 6, 6, 6, 6, 6, 0, 0, 0, 0,
+    /* 14 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 6, 6,
+    6, 6, 6, 6, 6, 6, 0, 0, 0, 0,
+    /* 15 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 6, 6,
+    6, 6, 6, 6, 6, 6, 0, 0, 0, 0,
+    /* 16 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7,
+    7, 7, 6, 6, 6, 6, 0, 0, 0, 0,
+    /* 17 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7,
+    7, 7, 6, 6, 6, 6, 0, 0, 0, 0,
+    /* 18 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7,
+    7, 7, 6, 6, 6, 6, 0, 0, 0, 0,
+    /* 19 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7,
+    7, 7, 6, 6, 6, 6, 0, 0, 0, 0,
+    /* 20 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 21 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 22 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 23 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  };
+
+  /* Pre-processing step 1 will convert the original image to segmentation
+   * processing format.
+   *
+   * Decimation (32x24) -> (16x12)
+   0|0|0|0|0|0|0|0|0|0|1|1|1|1|1|1|
+   0|1|2|3|4|5|6|7|8|9|0|1|2|3|4|5|
+
+   0      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   1      0,9,9,8,8,8,8,0,0,0,0,0,0,0,0,0,
+   2      0,9,9,8,8,8,8,0,0,0,0,0,0,0,0,0,
+   3      0,9,9,9,9,8,8,0,0,0,0,0,0,0,0,0,
+   4      0,9,9,9,9,8,8,0,0,0,0,0,0,0,0,0,
+   5      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   6      0,0,0,0,0,0,0,0,7,7,6,6,6,6,0,0,
+   7      0,0,0,0,0,0,0,0,7,7,6,6,6,6,0,0,
+   8      0,0,0,0,0,0,0,0,7,7,7,7,6,6,0,0,
+   9      0,0,0,0,0,0,0,0,7,7,7,7,6,6,0,0,
+   10     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   11     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, */
+
+
+  /* Pre-processing step 2: Add padding match segmentation input format
+   * Padding top-bottom (16x12) -> (16x16)
+   *
+   0|0|0|0|0|0|0|0|0|0|1|1|1|1|1|1|
+   0|1|2|3|4|5|6|7|8|9|0|1|2|3|4|5|
+
+   0      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,  Padding line
+   1      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,  Padding line
+   1      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   3      0,9,9,8,8,8,8,0,0,0,0,0,0,0,0,0,
+   4      0,9,9,8,8,8,8,0,0,0,0,0,0,0,0,0,
+   5      0,9,9,9,9,8,8,0,0,0,0,0,0,0,0,0,
+   6      0,9,9,9,9,8,8,0,0,0,0,0,0,0,0,0,
+   7      0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   8      0,0,0,0,0,0,0,0,7,7,6,6,6,6,0,0,
+   9      0,0,0,0,0,0,0,0,7,7,6,6,6,6,0,0,
+   10     0,0,0,0,0,0,0,0,7,7,7,7,6,6,0,0,
+   11     0,0,0,0,0,0,0,0,7,7,7,7,6,6,0,0,
+   12     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   13     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   14     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,  Padding line
+   15     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,  Padding line */
+
+
+  /* Post-processing remove area of the output that correspond to padding
+   * area in the input. In the following array 2, 3, 4, 5 correspond to
+   * segmented region ids.*/
+  guint8 post_proc_segmasks[] = {
+    /*        0|0|0|0|0|0|0|0|0|0|1|1|1|1|1|1| */
+    /*        0|1|2|3|4|5|6|7|8|9|0|1|2|3|4|5| */
+    /* 0  */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 1  */ 0, 2, 2, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 2  */ 0, 2, 2, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 3  */ 0, 2, 2, 2, 2, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 4  */ 0, 2, 2, 2, 2, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 5  */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 6  */ 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 5, 5, 5, 5, 0, 0,
+    /* 7  */ 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 5, 5, 5, 5, 0, 0,
+    /* 8  */ 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 5, 5, 0, 0,
+    /* 9  */ 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 5, 5, 0, 0,
+    /* 10 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 11 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  };
+
+  /* Creating analytics-relation meta to host analytics results */
+  rmeta = gst_buffer_add_analytics_relation_meta_full (vbuf, &init_params);
+
+  /* Create pool for segmentation masks */
+  gst_video_info_init (&minfo);
+  gst_video_info_set_format (&minfo, GST_VIDEO_FORMAT_GRAY8, 32, 24);
+  caps = gst_video_info_to_caps (&minfo);
+  mpool = gst_video_buffer_pool_new ();
+  config = gst_buffer_pool_get_config (mpool);
+
+  gst_buffer_pool_config_set_params (config, caps, minfo.size, 1, 0);
+  gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+  gst_buffer_pool_set_config (mpool, config);
+  gst_buffer_pool_set_active (mpool, TRUE);
+  gst_caps_unref (caps);
+
+  fail_unless (gst_buffer_pool_acquire_buffer (mpool, &mbuf, NULL) ==
+      GST_FLOW_OK);
+
+  gst_buffer_fill (mbuf, 0, post_proc_segmasks, 16 * 12);
+
+  /* Masks contain 5 region types [0,1,2,3,4]. We intentionnally change the
+   * order of region ids relative to their appearance in the output to
+   * show that API does not depend on any order or continuity. */
+  static const gsize region_count = 5;
+  guint region_ids[5];
+
+  /* Confidence levels are irrelevant in this context. */
+  gfloat confi[] = { 1.0, 1.0, 1.0, 1.0, 1.0 };
+  GQuark classes[5];
+
+  /* It's important that region index and classification index match. This
+   * is how a region is associated to a specific class.
+   *
+   * Region-id-0 correspond to region-index-0 is associated to class
+   * "background".
+   * Region-id-5 correspond to region-index-1 is associated to class
+   * "top-right-corner".  ┐
+   * Region-id-2 correspond to region-index-2 is associated to class
+   * "bottom-left-corner". └
+   * Region-id-3 correspond to region-index-3 is associated to class
+   * "top-right-corner". ┐
+   * Region-id-4 correspond to region-index-4 is associated to class
+   * "bottom-left-corner". └  */
+  region_ids[0] = 0;
+  classes[0] = g_quark_from_string ("background");
+
+  region_ids[1] = 5;
+  classes[1] = g_quark_from_string ("top-right-corner");
+
+  region_ids[2] = 2;
+  classes[2] = g_quark_from_string ("bottom-left-corner");
+
+  region_ids[3] = 3;
+  classes[3] = g_quark_from_string ("top-right-corner");
+
+  region_ids[4] = 4;
+  classes[4] = g_quark_from_string ("bottom-left-corner");
+
+  gst_analytics_relation_meta_add_segmentation_mtd (rmeta, mbuf,
+      GST_SEGMENTATION_TYPE_INSTANCE, region_count, region_ids, 0, 0, 0, 0,
+      &smtd);
+
+  gst_analytics_relation_meta_add_cls_mtd (rmeta, region_count, confi,
+      classes, &clsmtd);
+
+  gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_RELATE_TO, smtd.id, clsmtd.id);
+
+
+  /* Generate a truth vector for segmented region and associated class. */
+  guint8 truth_vector_segmentation_id[768];
+  GQuark truth_vector_segmentation_classes[768];
+
+  for (gsize i = 0; i < 768; i++) {
+    if (img[i] == 9) {
+      truth_vector_segmentation_id[i] = 2;
+      truth_vector_segmentation_classes[i] =
+          g_quark_from_string ("bottom-left-corner");
+    } else if (img[i] == 8) {
+      truth_vector_segmentation_id[i] = 3;
+      truth_vector_segmentation_classes[i] =
+          g_quark_from_string ("top-right-corner");
+    } else if (img[i] == 7) {
+      truth_vector_segmentation_id[i] = 4;
+      truth_vector_segmentation_classes[i] =
+          g_quark_from_string ("bottom-left-corner");
+    } else if (img[i] == 6) {
+      truth_vector_segmentation_id[i] = 5;
+      truth_vector_segmentation_classes[i] =
+          g_quark_from_string ("top-right-corner");
+    } else {
+      truth_vector_segmentation_id[i] = 0;
+      truth_vector_segmentation_classes[i] = g_quark_from_string ("background");
+    }
+  }
+
+  /* Verify segmentation analytics-meta and associated classification
+   * match truth vectors */
+  gsize idx;
+  GstMapInfo mmap_info;         /* mask map info */
+  gst_buffer_map (mbuf, &mmap_info, GST_MAP_READ);
+  for (gsize r = 0; r < 24; r++) {
+    gsize mr = r / 2;
+    for (gsize c = 0; c < 32; c++) {
+      gsize mc = c / 2;
+      gsize mask_idx = mr * 16 + mc;
+      gsize img_idx = r * 32 + c;
+
+      fail_unless (mmap_info.data[mask_idx] ==
+          truth_vector_segmentation_id[img_idx]);
+
+      /* Retrieve segmentation region index */
+      fail_unless (gst_analytics_segmentation_mtd_get_region_index (&smtd,
+              &idx, mmap_info.data[mask_idx]) == TRUE);
+
+      /* Check that the _get_region_id() API is consistent */
+      fail_unless (gst_analytics_segmentation_mtd_get_region_id (&smtd,
+              idx) == mmap_info.data[mask_idx]);
+
+      /* Retrieve classification associated with region */
+      fail_unless (gst_analytics_relation_meta_get_direct_related (rmeta,
+              smtd.id, GST_ANALYTICS_REL_TYPE_RELATE_TO,
+              gst_analytics_cls_mtd_get_mtd_type (), NULL, &clsmtd));
+
+      /* Retrive class associated with segmentation region */
+      fail_unless (gst_analytics_cls_mtd_get_length (&clsmtd) ==
+          gst_analytics_segmentation_mtd_get_region_count (&smtd));
+
+      /* Retrieve class associated with segmentation region */
+      fail_unless (gst_analytics_cls_mtd_get_quark (&clsmtd, idx) ==
+          truth_vector_segmentation_classes[img_idx]);
+    }
+  }
+  gst_buffer_unmap (mbuf, &mmap_info);
+
+
+  /* This _unref will return vbuf to vpool and also mbuf to mpool
+   * because GstAnalyticsSegmentationMtd define a
+   * GstAnalyticsMtdImpl::mtd_meta_clear */
+  gst_buffer_unref (vbuf);
+
+  gst_buffer_pool_set_active (mpool, FALSE);
+  gst_object_unref (mpool);
+  gst_buffer_pool_set_active (vpool, FALSE);
+  gst_object_unref (vpool);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_tensor_mtd)
+{
+  /* Verify we can add a tensor to analytics-meta and retrieve it */
+  GstBuffer *vbuf, *tbuf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstTensor *tensor2;
+  GstTensor *tensor3;
+  GstAnalyticsTensorMtd tensor_mtd;
+  gboolean ret;
+  gsize dims[2] = { 2, 3 };
+
+  vbuf = gst_buffer_new ();
+
+  rmeta = gst_buffer_add_analytics_relation_meta (vbuf);
+  ret = gst_analytics_relation_meta_add_tensor_mtd (rmeta, 22, &tensor_mtd);
+  fail_unless (ret == TRUE);
+
+  tensor2 = gst_analytics_tensor_mtd_get_tensor (&tensor_mtd);
+  fail_unless (tensor2);
+
+  fail_unless_equals_int (tensor2->num_dims, 22);
+  fail_unless_equals_int (tensor2->id, 0);
+  fail_unless (tensor2->data == NULL);
+
+  tbuf = gst_buffer_new_allocate (NULL, sizeof (float) * dims[0] * dims[1],
+      NULL);
+
+  ret = gst_analytics_relation_meta_add_tensor_mtd_simple (rmeta,
+      g_quark_from_string ("test2"), GST_TENSOR_DATA_TYPE_FLOAT32,
+      tbuf, GST_TENSOR_DIM_ORDER_ROW_MAJOR, G_N_ELEMENTS (dims), dims,
+      &tensor_mtd);
+  fail_unless (ret == TRUE);
+
+  tensor3 = gst_analytics_tensor_mtd_get_tensor (&tensor_mtd);
+  fail_unless (tensor3);
+
+  fail_unless_equals_int (tensor3->num_dims, 2);
+  fail_unless_equals_int (tensor3->id, g_quark_from_string ("test2"));
+  fail_unless_equals_int (tensor3->dims_order, GST_TENSOR_DIM_ORDER_ROW_MAJOR);
+  fail_unless_equals_int (tensor3->dims[0], 2);
+  fail_unless_equals_int (tensor3->dims[1], 3);
+  fail_unless (tensor3->data == tbuf);
+
+  gst_buffer_unref (vbuf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_iou_int)
+{
+  gint bb1_x = 30, bb1_y = 30, bb1_w = 10, bb1_h = 10;
+  gint bb2_x = 35, bb2_y = 30, bb2_w = 10, bb2_h = 10;
+  gfloat iou;
+
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_y = 35;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 175.0);
+
+  bb2_x = 40;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 0.0 / 200.0);
+
+  bb2_x = 30;
+  bb2_y = 35;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_x = 25;
+  bb2_y = 35;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 175.0);
+
+  bb2_x = 25;
+  bb2_y = 30;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_x = 25;
+  bb2_y = 25;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 175.0);
+
+  bb2_x = 30;
+  bb2_y = 25;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_x = 30;
+  bb2_y = 25;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_x = 30;
+  bb2_y = 30;
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 100.0 / 100.0);
+
+  bb1_x = 0;
+  bb1_y = 0;
+  bb1_w = 10;
+  bb1_h = 10;
+
+  bb2_x = -5;
+  bb2_y = 0;
+  bb2_w = 10;
+  bb2_h = 10;
+
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 100.0);
+
+  bb2_y = -5;
+
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 100.0);
+
+  bb1_x = -5;
+  bb1_y = -5;
+
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 25.0);
+
+  bb1_x = -5;
+  bb1_y = 0;
+
+  bb2_x = 0;
+  bb2_y = -5;
+
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 75.0);
+
+  bb2_y = -10;
+
+  iou = gst_analytics_image_util_iou_int (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 0.0 / 100.0);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_iou_float)
+{
+  gfloat bb1_x = 30.0, bb1_y = 30.0, bb1_w = 10.0, bb1_h = 10.0;
+  gfloat bb2_x = 35.0, bb2_y = 30.0, bb2_w = 10.0, bb2_h = 10.0;
+  gfloat iou;
+
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_y = 35;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 175.0);
+
+  bb2_x = 40;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 0.0 / 200.0);
+
+  bb2_x = 30;
+  bb2_y = 35;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_x = 25;
+  bb2_y = 35;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 175.0);
+
+  bb2_x = 25;
+  bb2_y = 30;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_x = 25;
+  bb2_y = 25;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 175.0);
+
+  bb2_x = 30;
+  bb2_y = 25;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_x = 30;
+  bb2_y = 25;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 150.0);
+
+  bb2_x = 30;
+  bb2_y = 30;
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 100.0 / 100.0);
+
+  bb1_x = 0;
+  bb1_y = 0;
+  bb1_w = 10;
+  bb1_h = 10;
+
+  bb2_x = -5;
+  bb2_y = 0;
+  bb2_w = 10;
+  bb2_h = 10;
+
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 50.0 / 100.0);
+
+  bb2_y = -5;
+
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 100.0);
+
+  bb1_x = -5;
+  bb1_y = -5;
+
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 25.0);
+
+  bb1_x = -5;
+  bb1_y = 0;
+
+  bb2_x = 0;
+  bb2_y = -5;
+
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 25.0 / 75.0);
+
+  bb2_y = -10;
+
+  iou = gst_analytics_image_util_iou_float (bb1_x, bb1_y, bb1_w, bb1_h, bb2_x,
+      bb2_y, bb2_w, bb2_h);
+  fail_unless_equals_float (iou, 0.0 / 100.0);
+
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_get_tensor)
+{
+  GstBuffer *buf, *tensor_data;
+  GstTensorMeta *tmeta;
+  GstTensor *tensor;
+  const GstTensor *tensor2;
+  GstTensor **tensors;
+  GQuark tensor_id = g_quark_from_string ("tensor-encoding-1");
+  gsize dims[] = { 1 };
+  gsize index;
+
+  /* Verify we can add a tensor-meta to a buffer */
+
+  /* Create tensor data */
+  guint8 *data = g_malloc0 (1);
+  *data = 28;
+
+  /* Wrap tensor data into a GstBuffer */
+  tensor_data = gst_buffer_new_wrapped_full (0, data, 1, 0, 1, data, g_free);
+
+  /* Create a new buffer where we attach tensor-meta */
+  buf = gst_buffer_new ();
+  tmeta = gst_buffer_add_tensor_meta (buf);
+
+  /* Create a tensor */
+  tensor = gst_tensor_new_simple (tensor_id, GST_TENSOR_DATA_TYPE_UINT8,
+      tensor_data, GST_TENSOR_DIM_ORDER_COL_MAJOR, 1, dims);
+
+  /* Create an array of tensor to fullfil GstTensor API */
+  tensors = g_new (GstTensor *, 1);
+  tensors[0] = tensor;
+
+  /* Set tensor-meta's tensors */
+  gst_tensor_meta_set (tmeta, 1, tensors);
+
+  /* Retieve tensor using index interface */
+  index = gst_tensor_meta_get_index_from_id (tmeta, tensor_id);
+
+  fail_unless (index == 0);
+
+  tensor2 = gst_tensor_meta_get (tmeta, index);
+
+  /* Verify tensor retrieved */
+  fail_unless (tensor == tensor2);
+
+  /* Retrieve tensor using tensor-id directly */
+  tensor2 = gst_tensor_meta_get_by_id (tmeta, tensor_id);
+
+  fail_unless (tensor == tensor2);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_group_mtd_with_size)
+{
+  /* Verify we can create a group metadata with fixed size */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  GstAnalyticsODMtd od_mtd1, od_mtd2;
+  gboolean ret;
+  gsize member_count;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Create a group with space for 2 members */
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 2,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Verify initial member count is 0 */
+  member_count = gst_analytics_group_mtd_get_member_count (&group_mtd);
+  fail_unless (member_count == 0);
+
+  /* Add some OD members */
+  GQuark type1 = g_quark_from_string ("person");
+  gst_analytics_relation_meta_add_od_mtd (rmeta, type1, 10, 20, 30, 40, 0.9f,
+      &od_mtd1);
+
+  GQuark type2 = g_quark_from_string ("car");
+  gst_analytics_relation_meta_add_od_mtd (rmeta, type2, 50, 60, 70, 80, 0.8f,
+      &od_mtd2);
+
+  /* Add members to the group */
+  ret = gst_analytics_group_mtd_add_member (&group_mtd, od_mtd1.id);
+  fail_unless (ret == TRUE);
+
+  ret = gst_analytics_group_mtd_add_member (&group_mtd, od_mtd2.id);
+  fail_unless (ret == TRUE);
+
+  /* Verify member count */
+  member_count = gst_analytics_group_mtd_get_member_count (&group_mtd);
+  fail_unless (member_count == 2);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_group_mtd_dynamic)
+{
+  /* Verify we can create a group metadata with dynamic allocation */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  GstAnalyticsODMtd od_mtd;
+  gboolean ret;
+  gsize member_count;
+  gint i;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Create a group with initial allocation for 2 members */
+  ret = gst_analytics_relation_meta_add_group_mtd (rmeta, 2, &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Add 5 members to trigger dynamic reallocation */
+  for (i = 0; i < 5; i++) {
+    GQuark type = g_quark_from_string ("object");
+    gst_analytics_relation_meta_add_od_mtd (rmeta, type, i * 10, i * 10,
+        20, 20, 0.5f, &od_mtd);
+
+    ret = gst_analytics_group_mtd_add_member (&group_mtd, od_mtd.id);
+    fail_unless (ret == TRUE);
+  }
+
+  /* Verify all members were added */
+  member_count = gst_analytics_group_mtd_get_member_count (&group_mtd);
+  fail_unless (member_count == 5);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_get_member)
+{
+  /* Verify we can retrieve members from a group */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  GstAnalyticsODMtd od_mtd1, od_mtd2;
+  GstAnalyticsMtd member;
+  gboolean ret;
+  gint x, y, w, h;
+  gfloat conf;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Create group with fixed size */
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 2,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Add two different OD metadata */
+  GQuark type1 = g_quark_from_string ("person");
+  gst_analytics_relation_meta_add_od_mtd (rmeta, type1, 10, 20, 30, 40, 0.9f,
+      &od_mtd1);
+
+  GQuark type2 = g_quark_from_string ("car");
+  gst_analytics_relation_meta_add_od_mtd (rmeta, type2, 50, 60, 70, 80, 0.8f,
+      &od_mtd2);
+
+  gst_analytics_group_mtd_add_member (&group_mtd, od_mtd1.id);
+  gst_analytics_group_mtd_add_member (&group_mtd, od_mtd2.id);
+
+  /* Retrieve first member */
+  ret = gst_analytics_group_mtd_get_member (&group_mtd, 0, &member);
+  fail_unless (ret == TRUE);
+
+  /* Verify it's the first OD we added */
+  fail_unless (gst_analytics_mtd_get_mtd_type (&member) ==
+      gst_analytics_od_mtd_get_mtd_type ());
+
+  gst_analytics_od_mtd_get_location ((GstAnalyticsODMtd *) & member, &x, &y,
+      &w, &h, &conf);
+  fail_unless (x == 10 && y == 20 && w == 30 && h == 40);
+  fail_unless_equals_float (conf, 0.9f);
+
+  /* Retrieve second member */
+  ret = gst_analytics_group_mtd_get_member (&group_mtd, 1, &member);
+  fail_unless (ret == TRUE);
+
+  gst_analytics_od_mtd_get_location ((GstAnalyticsODMtd *) & member, &x, &y,
+      &w, &h, &conf);
+  fail_unless (x == 50 && y == 60 && w == 70 && h == 80);
+  fail_unless_equals_float (conf, 0.8f);
+
+  /* Test invalid index */
+  ret = gst_analytics_group_mtd_get_member (&group_mtd, 2, &member);
+  fail_unless (ret == FALSE);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_semantic_tag)
+{
+  /* Verify we can set and get semantic tags */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  gboolean ret;
+  const gchar *tag_str = "hand-21-kp";
+  gchar *tag;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 5,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Before setting a tag, get_semantic_tag should return an empty string */
+  tag = gst_analytics_mtd_get_semantic_tag (&group_mtd);
+  fail_unless (tag != NULL);
+  fail_unless_equals_string (tag, "");
+  g_free (tag);
+
+  /* Set semantic tag using string */
+  ret = gst_analytics_mtd_set_semantic_tag (&group_mtd, tag_str);
+  fail_unless (ret == TRUE);
+
+  /* Verify the tag was set correctly via has_semantic_tag */
+  fail_unless (gst_analytics_mtd_has_semantic_tag (&group_mtd, tag_str));
+
+  /* Verify the tag was set correctly via get_semantic_tag */
+  tag = gst_analytics_mtd_get_semantic_tag (&group_mtd);
+  fail_unless (tag != NULL);
+  fail_unless_equals_string (tag, tag_str);
+  g_free (tag);
+
+  /* Change the tag and verify the new value */
+  ret = gst_analytics_mtd_set_semantic_tag (&group_mtd, "posture/body-17-kp");
+  fail_unless (ret == TRUE);
+
+  tag = gst_analytics_mtd_get_semantic_tag (&group_mtd);
+  fail_unless (tag != NULL);
+  fail_unless_equals_string (tag, "posture/body-17-kp");
+  g_free (tag);
+  fail_unless (!gst_analytics_mtd_has_semantic_tag (&group_mtd, tag_str));
+
+  /* Test unsetting tag with NULL */
+  ret = gst_analytics_mtd_set_semantic_tag (&group_mtd, NULL);
+  fail_unless (ret == TRUE);
+
+  fail_unless (!gst_analytics_mtd_has_semantic_tag (&group_mtd, tag_str));
+
+  tag = gst_analytics_mtd_get_semantic_tag (&group_mtd);
+  fail_unless (tag != NULL);
+  fail_unless_equals_string (tag, "");
+  g_free (tag);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_semantic_tag_has_prefix)
+{
+  /* Verify semantic tag prefix matching */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  gboolean ret;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 5,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  ret = gst_analytics_mtd_set_semantic_tag (&group_mtd, "posture/hand-21-kp");
+  fail_unless (ret == TRUE);
+
+  fail_unless (gst_analytics_mtd_semantic_tag_has_prefix (&group_mtd,
+          "posture/"));
+  fail_unless (gst_analytics_mtd_semantic_tag_has_prefix (&group_mtd,
+          "posture/hand-21-kp"));
+  fail_unless (!gst_analytics_mtd_semantic_tag_has_prefix (&group_mtd,
+          "posture/body"));
+  fail_unless (!gst_analytics_mtd_semantic_tag_has_prefix (&group_mtd,
+          "keypoint/"));
+
+  /* Unset tag should not match any prefix */
+  ret = gst_analytics_mtd_set_semantic_tag (&group_mtd, NULL);
+  fail_unless (ret == TRUE);
+  fail_unless (!gst_analytics_mtd_semantic_tag_has_prefix (&group_mtd,
+          "posture/"));
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_retrieval)
+{
+  /* Verify we can retrieve group metadata from relation meta */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd, retrieved_mtd;
+  gboolean ret;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Create group and set semantic tag */
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 3,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Setting semantic tag */
+  gst_analytics_mtd_set_semantic_tag (&group_mtd, "test-group");
+
+  /* Retrieve the group using the get function */
+  ret = gst_analytics_relation_meta_get_group_mtd (rmeta, group_mtd.id,
+      &retrieved_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Verify it's the same group */
+  fail_unless (retrieved_mtd.id == group_mtd.id);
+  fail_unless (retrieved_mtd.meta == group_mtd.meta);
+
+  fail_unless (gst_analytics_mtd_has_semantic_tag (&retrieved_mtd,
+          "test-group"));
+
+  /* Verify get_semantic_tag also works on retrieved handle */
+  {
+    gchar *sem_tag = gst_analytics_mtd_get_semantic_tag (&retrieved_mtd);
+    fail_unless_equals_string (sem_tag, "test-group");
+    g_free (sem_tag);
+  }
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_with_relations)
+{
+  /* Verify groups can participate in relations */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  GstAnalyticsODMtd od_mtd;
+  GstAnalyticsClsMtd cls_mtd;
+  gboolean ret;
+  gfloat conf_lvl[] = { 0.8f };
+  GQuark class_quarks[] = { g_quark_from_string ("hand") };
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Create a group for hand keypoints */
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 21,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  gst_analytics_mtd_set_semantic_tag (&group_mtd, "hand-21-kp");
+
+  /* Create an OD for the hand bounding box */
+  GQuark type = g_quark_from_string ("hand");
+  gst_analytics_relation_meta_add_od_mtd (rmeta, type, 100, 100, 50, 80, 0.95f,
+      &od_mtd);
+
+  /* Create a classification */
+  gst_analytics_relation_meta_add_cls_mtd (rmeta, 1, conf_lvl, class_quarks,
+      &cls_mtd);
+
+  /* Set relation: OD contains the group */
+  ret = gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_CONTAIN, od_mtd.id, group_mtd.id);
+  fail_unless (ret == TRUE);
+
+  /* Set relation: group relates to classification */
+  ret = gst_analytics_relation_meta_set_relation (rmeta,
+      GST_ANALYTICS_REL_TYPE_RELATE_TO, group_mtd.id, cls_mtd.id);
+  fail_unless (ret == TRUE);
+
+  /* Verify the relations exist */
+  gboolean exist;
+  exist = gst_analytics_relation_meta_exist (rmeta, od_mtd.id, group_mtd.id,
+      1, GST_ANALYTICS_REL_TYPE_CONTAIN, NULL);
+  fail_unless (exist == TRUE);
+
+  exist = gst_analytics_relation_meta_exist (rmeta, group_mtd.id, cls_mtd.id,
+      1, GST_ANALYTICS_REL_TYPE_RELATE_TO, NULL);
+  fail_unless (exist == TRUE);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_iterate_all)
+{
+  /* Verify we can iterate all members using GST_ANALYTICS_MTD_TYPE_ANY */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  GstAnalyticsODMtd od_mtd;
+  GstAnalyticsMtd member;
+  gpointer state = NULL;
+  gboolean ret;
+  gint count = 0;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Create group with 3 members */
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 3,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Add 3 OD members */
+  for (gint i = 0; i < 3; i++) {
+    GQuark type = g_quark_from_string ("object");
+    gst_analytics_relation_meta_add_od_mtd (rmeta, type, i * 10, i * 20,
+        30, 40, 0.5f + i * 0.1f, &od_mtd);
+    gst_analytics_group_mtd_add_member (&group_mtd, od_mtd.id);
+  }
+
+  /* Iterate all members */
+  while (gst_analytics_group_mtd_iterate (&group_mtd, &state,
+          GST_ANALYTICS_MTD_TYPE_ANY, &member)) {
+    /* Verify it's an OD type */
+    fail_unless (gst_analytics_mtd_get_mtd_type (&member) ==
+        gst_analytics_od_mtd_get_mtd_type ());
+    count++;
+  }
+
+  /* Verify we iterated all 3 members */
+  fail_unless (count == 3);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_iterate_with_type_filter)
+{
+  /* Verify we can filter members by type during iteration */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  GstAnalyticsODMtd od_mtd;
+  GstAnalyticsClsMtd cls_mtd;
+  GstAnalyticsMtd member;
+  gpointer state = NULL;
+  gboolean ret;
+  gint od_count = 0, cls_count = 0, total_count = 0;
+  gfloat conf_lvl[] = { 0.8f };
+  GQuark class_quarks[] = { g_quark_from_string ("test") };
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Create group with space for mixed types */
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 6,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Add 3 OD members */
+  for (gint i = 0; i < 3; i++) {
+    GQuark type = g_quark_from_string ("person");
+    gst_analytics_relation_meta_add_od_mtd (rmeta, type, i * 10, i * 10,
+        20, 30, 0.9f, &od_mtd);
+    gst_analytics_group_mtd_add_member (&group_mtd, od_mtd.id);
+  }
+
+  /* Add 3 classification members */
+  for (gint i = 0; i < 3; i++) {
+    gst_analytics_relation_meta_add_cls_mtd (rmeta, 1, conf_lvl, class_quarks,
+        &cls_mtd);
+    gst_analytics_group_mtd_add_member (&group_mtd, cls_mtd.id);
+  }
+
+  /* Count all members */
+  state = NULL;
+  while (gst_analytics_group_mtd_iterate (&group_mtd, &state,
+          GST_ANALYTICS_MTD_TYPE_ANY, &member)) {
+    total_count++;
+  }
+  fail_unless (total_count == 6);
+
+  /* Iterate only OD members */
+  state = NULL;
+  while (gst_analytics_group_mtd_iterate (&group_mtd, &state,
+          gst_analytics_od_mtd_get_mtd_type (), &member)) {
+    fail_unless (gst_analytics_mtd_get_mtd_type (&member) ==
+        gst_analytics_od_mtd_get_mtd_type ());
+    od_count++;
+  }
+  fail_unless (od_count == 3);
+
+  /* Iterate only classification members */
+  state = NULL;
+  while (gst_analytics_group_mtd_iterate (&group_mtd, &state,
+          gst_analytics_cls_mtd_get_mtd_type (), &member)) {
+    fail_unless (gst_analytics_mtd_get_mtd_type (&member) ==
+        gst_analytics_cls_mtd_get_mtd_type ());
+    cls_count++;
+  }
+  fail_unless (cls_count == 3);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_iterate_empty)
+{
+  /* Verify iteration on empty group works correctly */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  GstAnalyticsMtd member;
+  gpointer state = NULL;
+  gboolean ret;
+  gint count = 0;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Create empty group */
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 5,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Verify iteration returns FALSE immediately */
+  ret = gst_analytics_group_mtd_iterate (&group_mtd, &state,
+      GST_ANALYTICS_MTD_TYPE_ANY, &member);
+  fail_unless (ret == FALSE);
+
+  /* Verify no members were iterated */
+  fail_unless (count == 0);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_group_mtd_iterate_member_data)
+{
+  /* Verify iterated members contain correct data */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  GstAnalyticsODMtd od_mtd;
+  GstAnalyticsMtd member;
+  gpointer state = NULL;
+  gboolean ret;
+  gint x, y, w, h;
+  gfloat conf;
+  gint expected_positions[] = { 0, 10, 20 };
+  gint index = 0;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  ret = gst_analytics_relation_meta_add_group_mtd_with_size (rmeta, 3,
+      &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Add 3 OD members with different positions */
+  for (gint i = 0; i < 3; i++) {
+    GQuark type = g_quark_from_string ("car");
+    gst_analytics_relation_meta_add_od_mtd (rmeta, type, i * 10, i * 10,
+        15, 25, 0.95f, &od_mtd);
+    gst_analytics_group_mtd_add_member (&group_mtd, od_mtd.id);
+  }
+
+  /* Iterate and verify each member's data */
+  while (gst_analytics_group_mtd_iterate (&group_mtd, &state,
+          GST_ANALYTICS_MTD_TYPE_ANY, &member)) {
+    gst_analytics_od_mtd_get_location ((GstAnalyticsODMtd *) & member,
+        &x, &y, &w, &h, &conf);
+
+    fail_unless (x == expected_positions[index]);
+    fail_unless (y == expected_positions[index]);
+    fail_unless (w == 15);
+    fail_unless (h == 25);
+    fail_unless_equals_float (conf, 0.95f);
+
+    index++;
+  }
+
+  fail_unless (index == 3);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_keypoint_mtd_2d)
+{
+  /* Verify we can create a 2D keypoint metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsKeypointMtd kp_mtd;
+  gint x, y, z;
+  gfloat conf;
+  GstAnalyticsKeypointDimensions dim;
+  gboolean ret;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add a 2D keypoint */
+  ret = gst_analytics_relation_meta_add_keypoint_mtd (rmeta,
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 100, 200, 0,
+      GST_ANALYTICS_KEYPOINT_VISIBILITY_UNKNOWN, 0.95f, &kp_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Retrieve and verify position and dimension */
+  ret = gst_analytics_keypoint_mtd_get_position (&kp_mtd, &x, &y, &z, &dim);
+  fail_unless (ret == TRUE);
+  fail_unless (x == 100 && y == 200 && z == 0);
+  fail_unless (dim == GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D);
+
+  /* Verify confidence */
+  ret = gst_analytics_keypoint_mtd_get_confidence (&kp_mtd, &conf);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_float (conf, 0.95f);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_keypoint_mtd_3d)
+{
+  /* Verify we can create a 3D keypoint metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsKeypointMtd kp_mtd;
+  gint x, y, z;
+  gfloat conf;
+  GstAnalyticsKeypointDimensions dim;
+  gboolean ret;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add a 3D keypoint */
+  ret = gst_analytics_relation_meta_add_keypoint_mtd (rmeta,
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_3D, 100, 200, 300,
+      GST_ANALYTICS_KEYPOINT_VISIBILITY_UNKNOWN, 0.85f, &kp_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Retrieve and verify position and dimension */
+  ret = gst_analytics_keypoint_mtd_get_position (&kp_mtd, &x, &y, &z, &dim);
+  fail_unless (ret == TRUE);
+  fail_unless (x == 100 && y == 200 && z == 300);
+  fail_unless (dim == GST_ANALYTICS_KEYPOINT_DIMENSIONS_3D);
+
+  /* Verify confidence */
+  ret = gst_analytics_keypoint_mtd_get_confidence (&kp_mtd, &conf);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_float (conf, 0.85f);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_keypoint_mtd_retrieval)
+{
+  /* Verify we can retrieve keypoint metadata by ID */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsKeypointMtd kp_mtd_orig, kp_mtd_retrieved;
+  gint x, y, z;
+  gfloat conf;
+  GstAnalyticsKeypointDimensions dim;
+  gboolean ret;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add a keypoint */
+  ret = gst_analytics_relation_meta_add_keypoint_mtd (rmeta,
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 150, 250, 0,
+      GST_ANALYTICS_KEYPOINT_VISIBILITY_UNKNOWN, 0.9f, &kp_mtd_orig);
+  fail_unless (ret == TRUE);
+
+  /* Retrieve using ID */
+  ret = gst_analytics_relation_meta_get_keypoint_mtd (rmeta, kp_mtd_orig.id,
+      &kp_mtd_retrieved);
+  fail_unless (ret == TRUE);
+
+  /* Verify retrieved data matches */
+  ret = gst_analytics_keypoint_mtd_get_position (&kp_mtd_retrieved, &x, &y,
+      &z, &dim);
+  fail_unless (ret == TRUE);
+  fail_unless (x == 150 && y == 250 && z == 0);
+  fail_unless (dim == GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D);
+
+  ret = gst_analytics_keypoint_mtd_get_confidence (&kp_mtd_retrieved, &conf);
+  fail_unless (ret == TRUE);
+  fail_unless_equals_float (conf, 0.9f);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_keypoints_group_without_skeleton)
+{
+  /* Verify we can create a group of keypoints without skeleton */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  gint positions[] = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
+  gboolean ret;
+  gsize member_count;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add group of 5 keypoints without skeleton */
+  ret = gst_analytics_relation_meta_add_keypoints_group (rmeta, "test-5-kp",
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 10, positions, 5, NULL, NULL, 0,
+      NULL, &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Verify group member count */
+  member_count = gst_analytics_group_mtd_get_member_count (&group_mtd);
+  fail_unless (member_count == 5);
+
+  /* Verify semantic tag */
+  fail_unless (gst_analytics_mtd_has_semantic_tag (&group_mtd, "test-5-kp"));
+  {
+    gchar *sem_tag = gst_analytics_mtd_get_semantic_tag (&group_mtd);
+    fail_unless_equals_string (sem_tag, "test-5-kp");
+    g_free (sem_tag);
+  }
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_add_keypoints_group_with_skeleton)
+{
+  /* Verify we can create a group of keypoints with skeleton links */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  gint positions[] = { 10, 20, 30, 40, 50, 60 };
+  gfloat confidences[] = { 0.9f, 0.8f, 0.7f };
+  gint skeleton_pairs[] = { 0, 1, 1, 2 };       /* Links: 0<->1, 1<->2 */
+  gboolean ret;
+  gsize member_count;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add group of 3 keypoints with 2 skeleton links */
+  ret = gst_analytics_relation_meta_add_keypoints_group (rmeta, "simple-3-kp",
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 6, positions, 3, confidences, NULL,
+      4, skeleton_pairs, &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Verify group member count */
+  member_count = gst_analytics_group_mtd_get_member_count (&group_mtd);
+  fail_unless (member_count == 3);
+
+  /* Verify skeleton relations exist - get first two keypoints and check relation */
+  GstAnalyticsMtd member0, member1;
+  ret = gst_analytics_group_mtd_get_member (&group_mtd, 0, &member0);
+  fail_unless (ret == TRUE);
+
+  ret = gst_analytics_group_mtd_get_member (&group_mtd, 1, &member1);
+  fail_unless (ret == TRUE);
+
+  /* Verify relation exists between first two keypoints */
+  gboolean has_relation = gst_analytics_relation_meta_exist (rmeta,
+      member0.id, member1.id, 1, GST_ANALYTICS_REL_TYPE_RELATE_TO, NULL);
+  fail_unless (has_relation == TRUE);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_keypoints_group_hand_pose)
+{
+  /* Verify we can create a hand pose (21 keypoints) with skeleton */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  gint positions[42];           /* 21 keypoints * 2 coordinates */
+  gfloat confidences[21];
+  gint skeleton_pairs[40];      /* 20 links * 2 indices = 40 values */
+  gint i;
+  gboolean ret;
+  gsize member_count;
+
+  /* Initialize positions and confidences */
+  for (i = 0; i < 21; i++) {
+    positions[i * 2] = 100 + i * 10;
+    positions[i * 2 + 1] = 200 + i * 5;
+    confidences[i] = 0.8f + (i * 0.01f);
+  }
+
+  /* Initialize skeleton links. See https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker
+     for hand-21-kp seleton definition */
+
+  /* Palm connections */
+  skeleton_pairs[0] = 0;
+  skeleton_pairs[1] = 1;
+
+  skeleton_pairs[2] = 0;
+  skeleton_pairs[3] = 5;
+
+  skeleton_pairs[4] = 0;
+  skeleton_pairs[5] = 17;
+
+  skeleton_pairs[6] = 5;
+  skeleton_pairs[7] = 9;
+
+  skeleton_pairs[8] = 9;
+  skeleton_pairs[9] = 13;
+
+  skeleton_pairs[10] = 13;
+  skeleton_pairs[11] = 17;
+
+  /* Thumb: 1->2->3->4 */
+  skeleton_pairs[12] = 1;
+  skeleton_pairs[13] = 2;
+
+  skeleton_pairs[14] = 2;
+  skeleton_pairs[15] = 3;
+
+  skeleton_pairs[16] = 3;
+  skeleton_pairs[17] = 4;
+
+  /* Index: 5->6->7->8 */
+  skeleton_pairs[18] = 5;
+  skeleton_pairs[19] = 6;
+
+  skeleton_pairs[20] = 6;
+  skeleton_pairs[21] = 7;
+
+  skeleton_pairs[22] = 7;
+  skeleton_pairs[23] = 8;
+
+  /* Middle: 9->10->11->12 */
+  skeleton_pairs[24] = 9;
+  skeleton_pairs[25] = 10;
+
+  skeleton_pairs[26] = 10;
+  skeleton_pairs[27] = 11;
+
+  skeleton_pairs[28] = 11;
+  skeleton_pairs[29] = 12;
+
+  /* Ring: 13->14->15->16 */
+  skeleton_pairs[30] = 13;
+  skeleton_pairs[31] = 14;
+
+  skeleton_pairs[32] = 14;
+  skeleton_pairs[33] = 15;
+
+  skeleton_pairs[34] = 15;
+  skeleton_pairs[35] = 16;
+
+  /* Pinky: 17->18->19 */
+  skeleton_pairs[36] = 17;
+  skeleton_pairs[37] = 18;
+
+  skeleton_pairs[38] = 18;
+  skeleton_pairs[39] = 19;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add hand pose group */
+  ret = gst_analytics_relation_meta_add_keypoints_group (rmeta, "hand-21-kp",
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 42, positions, 21, confidences,
+      NULL, 40, skeleton_pairs, &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Verify all keypoints are in group */
+  member_count = gst_analytics_group_mtd_get_member_count (&group_mtd);
+  fail_unless (member_count == 21);
+
+  /* Verify some skeleton relations exist */
+  GstAnalyticsMtd kp0, kp1;
+  ret = gst_analytics_group_mtd_get_member (&group_mtd, 0, &kp0);
+  fail_unless (ret == TRUE);
+  ret = gst_analytics_group_mtd_get_member (&group_mtd, 1, &kp1);
+  fail_unless (ret == TRUE);
+
+  gboolean has_relation = gst_analytics_relation_meta_exist (rmeta,
+      kp0.id, kp1.id, 1, GST_ANALYTICS_REL_TYPE_RELATE_TO, NULL);
+  fail_unless (has_relation == TRUE);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_keypoints_group_iteration)
+{
+  /* Verify we can iterate through keypoints in a group */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  gint positions[] = { 10, 20, 30, 40, 50, 60 };
+  gboolean ret;
+  GstAnalyticsMtd member;
+  gpointer state = NULL;
+  gint kp_count = 0;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add group of 3 keypoints */
+  ret = gst_analytics_relation_meta_add_keypoints_group (rmeta, "iter-3-kp",
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 6, positions, 3, NULL, NULL, 0,
+      NULL, &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Iterate through keypoints */
+  while (gst_analytics_group_mtd_iterate (&group_mtd, &state,
+          gst_analytics_keypoint_mtd_get_mtd_type (), &member)) {
+    gint x, y, z;
+    gfloat conf;
+    GstAnalyticsKeypointDimensions dim;
+
+    /* Verify we can get data from each keypoint */
+    ret = gst_analytics_keypoint_mtd_get_position ((GstAnalyticsKeypointMtd *)
+        & member, &x, &y, &z, &dim);
+    fail_unless (ret == TRUE);
+    fail_unless (dim == GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D);
+
+    ret = gst_analytics_keypoint_mtd_get_confidence ((GstAnalyticsKeypointMtd
+            *) & member, &conf);
+    fail_unless (ret == TRUE);
+
+    kp_count++;
+  }
+
+  /* Verify correct number of keypoints iterated */
+  fail_unless (kp_count == 3);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_keypoints_group_with_confidences)
+{
+  /* Verify confidence values are preserved in keypoints group */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  gint positions[] = { 10, 20, 30, 40, 50, 60 };
+  gfloat confidences[] = { 0.9f, 0.8f, 0.7f };
+  gboolean ret;
+  GstAnalyticsMtd member;
+  gpointer state = NULL;
+  gint expected_count = 0;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add group with specific confidences */
+  ret = gst_analytics_relation_meta_add_keypoints_group (rmeta, "conf-3-kp",
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 6, positions, 3, confidences, NULL,
+      0, NULL, &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Verify each keypoint has correct confidence */
+  float expected_confidences[] = { 0.9f, 0.8f, 0.7f };
+  while (gst_analytics_group_mtd_iterate (&group_mtd, &state,
+          gst_analytics_keypoint_mtd_get_mtd_type (), &member)) {
+    gfloat conf;
+    ret = gst_analytics_keypoint_mtd_get_confidence ((GstAnalyticsKeypointMtd
+            *) & member, &conf);
+    fail_unless (ret == TRUE);
+    fail_unless_equals_float (conf, expected_confidences[expected_count]);
+    expected_count++;
+  }
+
+  fail_unless (expected_count == 3);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_keypoints_group_without_confidences)
+{
+  /* Verify default confidence (1.0f) when confidences=NULL */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_mtd;
+  gint positions[] = { 10, 20, 30, 40, 50, 60 };
+  gboolean ret;
+  GstAnalyticsMtd member;
+  gpointer state = NULL;
+  gint kp_count = 0;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add group without confidences (should default to 1.0f) */
+  ret = gst_analytics_relation_meta_add_keypoints_group (rmeta, "noconf-3-kp",
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 6, positions, 3, NULL, NULL, 0,
+      NULL, &group_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Verify each keypoint has default confidence of 1.0f */
+  while (gst_analytics_group_mtd_iterate (&group_mtd, &state,
+          gst_analytics_keypoint_mtd_get_mtd_type (), &member)) {
+    gfloat conf;
+    ret = gst_analytics_keypoint_mtd_get_confidence ((GstAnalyticsKeypointMtd
+            *) & member, &conf);
+    fail_unless (ret == TRUE);
+    fail_unless_equals_float (conf, 1.0f);
+    kp_count++;
+  }
+
+  fail_unless (kp_count == 3);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_keypoint_group_2d_vs_3d)
+{
+  /* Verify 2D and 3D keypoints are handled correctly */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsGroupMtd group_2d, group_3d;
+  gint positions_2d[] = { 10, 20, 30, 40 };
+  gint positions_3d[] = { 10, 20, 100, 30, 40, 200 };
+  gboolean ret;
+  GstAnalyticsMtd member;
+  gpointer state;
+  gint x, y, z;
+  GstAnalyticsKeypointDimensions dim;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  /* Add 2D keypoints group */
+  ret = gst_analytics_relation_meta_add_keypoints_group (rmeta, "2d-2-kp",
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D, 4, positions_2d, 2, NULL, NULL, 0,
+      NULL, &group_2d);
+  fail_unless (ret == TRUE);
+
+  /* Add 3D keypoints group */
+  ret = gst_analytics_relation_meta_add_keypoints_group (rmeta, "3d-2-kp",
+      GST_ANALYTICS_KEYPOINT_DIMENSIONS_3D, 6, positions_3d, 2, NULL, NULL, 0,
+      NULL, &group_3d);
+  fail_unless (ret == TRUE);
+
+  /* Verify 2D keypoints */
+  state = NULL;
+  gint idx = 0;
+  while (gst_analytics_group_mtd_iterate (&group_2d, &state,
+          gst_analytics_keypoint_mtd_get_mtd_type (), &member)) {
+    ret = gst_analytics_keypoint_mtd_get_position ((GstAnalyticsKeypointMtd *)
+        & member, &x, &y, &z, &dim);
+    fail_unless (ret == TRUE);
+    fail_unless (dim == GST_ANALYTICS_KEYPOINT_DIMENSIONS_2D);
+    fail_unless (z == 0);       /* Z should be 0 for 2D */
+    idx++;
+  }
+  fail_unless (idx == 2);
+
+  /* Verify 3D keypoints */
+  state = NULL;
+  idx = 0;
+  while (gst_analytics_group_mtd_iterate (&group_3d, &state,
+          gst_analytics_keypoint_mtd_get_mtd_type (), &member)) {
+    ret = gst_analytics_keypoint_mtd_get_position ((GstAnalyticsKeypointMtd *)
+        & member, &x, &y, &z, &dim);
+    fail_unless (ret == TRUE);
+    fail_unless (dim == GST_ANALYTICS_KEYPOINT_DIMENSIONS_3D);
+    fail_unless (z != 0);       /* Z should not be 0 for 3D */
+    idx++;
+  }
+  fail_unless (idx == 2);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_mtd_semantic_tag_on_od)
+{
+  /* Verify generic semantic tag works on object detection metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsODMtd od_mtd;
+  gboolean ret;
+  gchar *tag;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  GQuark type = g_quark_from_string ("person");
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, 10, 20, 30, 40,
+      0.9f, &od_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Initially no semantic tag */
+  tag = gst_analytics_mtd_get_semantic_tag ((GstAnalyticsMtd *) & od_mtd);
+  fail_unless (tag != NULL);
+  fail_unless_equals_string (tag, "");
+  g_free (tag);
+
+  /* Set and verify */
+  ret = gst_analytics_mtd_set_semantic_tag ((GstAnalyticsMtd *) & od_mtd,
+      "detector/yolov8");
+  fail_unless (ret == TRUE);
+
+  fail_unless (gst_analytics_mtd_has_semantic_tag ((GstAnalyticsMtd *) & od_mtd,
+          "detector/yolov8"));
+  fail_unless (!gst_analytics_mtd_has_semantic_tag (
+          (GstAnalyticsMtd *) & od_mtd, "detector/ssd"));
+
+  fail_unless (gst_analytics_mtd_semantic_tag_has_prefix (
+          (GstAnalyticsMtd *) & od_mtd, "detector/"));
+  fail_unless (!gst_analytics_mtd_semantic_tag_has_prefix (
+          (GstAnalyticsMtd *) & od_mtd, "classifier/"));
+
+  tag = gst_analytics_mtd_get_semantic_tag ((GstAnalyticsMtd *) & od_mtd);
+  fail_unless_equals_string (tag, "detector/yolov8");
+  g_free (tag);
+
+  /* Clear with NULL */
+  ret = gst_analytics_mtd_set_semantic_tag ((GstAnalyticsMtd *) & od_mtd, NULL);
+  fail_unless (ret == TRUE);
+
+  tag = gst_analytics_mtd_get_semantic_tag ((GstAnalyticsMtd *) & od_mtd);
+  fail_unless_equals_string (tag, "");
+  g_free (tag);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_mtd_semantic_tag_on_cls)
+{
+  /* Verify generic semantic tag works on classification metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsClsMtd cls_mtd;
+  gboolean ret;
+  gchar *tag;
+  gfloat conf_lvl[] = { 0.8f, 0.2f };
+  GQuark class_quarks[2];
+
+  class_quarks[0] = g_quark_from_string ("cat");
+  class_quarks[1] = g_quark_from_string ("dog");
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (rmeta, 2, conf_lvl,
+      class_quarks, &cls_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Set semantic tag on classification */
+  ret = gst_analytics_mtd_set_semantic_tag ((GstAnalyticsMtd *) & cls_mtd,
+      "classifier/resnet50");
+  fail_unless (ret == TRUE);
+
+  fail_unless (gst_analytics_mtd_has_semantic_tag (
+          (GstAnalyticsMtd *) & cls_mtd, "classifier/resnet50"));
+
+  tag = gst_analytics_mtd_get_semantic_tag ((GstAnalyticsMtd *) & cls_mtd);
+  fail_unless_equals_string (tag, "classifier/resnet50");
+  g_free (tag);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_mtd_semantic_tag_on_tracking)
+{
+  /* Verify generic semantic tag works on tracking metadata */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsTrackingMtd trk_mtd;
+  gboolean ret;
+  gchar *tag;
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  ret = gst_analytics_relation_meta_add_tracking_mtd (rmeta, 42,
+      GST_CLOCK_TIME_NONE, &trk_mtd);
+  fail_unless (ret == TRUE);
+
+  ret = gst_analytics_mtd_set_semantic_tag ((GstAnalyticsMtd *) & trk_mtd,
+      "tracker/deepsort");
+  fail_unless (ret == TRUE);
+
+  fail_unless (gst_analytics_mtd_has_semantic_tag (
+          (GstAnalyticsMtd *) & trk_mtd, "tracker/deepsort"));
+  fail_unless (gst_analytics_mtd_semantic_tag_has_prefix (
+          (GstAnalyticsMtd *) & trk_mtd, "tracker/"));
+
+  tag = gst_analytics_mtd_get_semantic_tag ((GstAnalyticsMtd *) & trk_mtd);
+  fail_unless_equals_string (tag, "tracker/deepsort");
+  g_free (tag);
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_mtd_semantic_tag_multiple_on_same_buffer)
+{
+  /* Verify different mtd on the same buffer can have independent tags */
+  GstBuffer *buf;
+  GstAnalyticsRelationMeta *rmeta;
+  GstAnalyticsODMtd od_mtd;
+  GstAnalyticsClsMtd cls_mtd;
+  gboolean ret;
+  gchar *tag;
+  gfloat conf_lvl[] = { 0.9f };
+  GQuark class_quarks[1];
+
+  class_quarks[0] = g_quark_from_string ("person");
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  GQuark type = g_quark_from_string ("person");
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, 0, 0, 100, 200,
+      0.95f, &od_mtd);
+  fail_unless (ret == TRUE);
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (rmeta, 1, conf_lvl,
+      class_quarks, &cls_mtd);
+  fail_unless (ret == TRUE);
+
+  /* Set different tags */
+  ret = gst_analytics_mtd_set_semantic_tag ((GstAnalyticsMtd *) & od_mtd,
+      "detector/yolo");
+  fail_unless (ret == TRUE);
+  ret = gst_analytics_mtd_set_semantic_tag ((GstAnalyticsMtd *) & cls_mtd,
+      "classifier/mobilenet");
+  fail_unless (ret == TRUE);
+
+  /* Verify they are independent */
+  tag = gst_analytics_mtd_get_semantic_tag ((GstAnalyticsMtd *) & od_mtd);
+  fail_unless_equals_string (tag, "detector/yolo");
+  g_free (tag);
+
+  tag = gst_analytics_mtd_get_semantic_tag ((GstAnalyticsMtd *) & cls_mtd);
+  fail_unless_equals_string (tag, "classifier/mobilenet");
+  g_free (tag);
+
+  /* Verify cross-check: one doesn't match the other's tag */
+  fail_unless (!gst_analytics_mtd_has_semantic_tag (
+          (GstAnalyticsMtd *) & od_mtd, "classifier/mobilenet"));
+  fail_unless (!gst_analytics_mtd_has_semantic_tag (
+          (GstAnalyticsMtd *) & cls_mtd, "detector/yolo"));
+
+  gst_buffer_unref (buf);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_mtd_semantic_tag_survives_copy)
+{
+  /* Verify semantic tags are preserved when buffer metadata is copied */
+  GstBuffer *buf, *buf2;
+  GstAnalyticsRelationMeta *rmeta, *rmeta2;
+  GstAnalyticsODMtd od_mtd;
+  GstAnalyticsClsMtd cls_mtd;
+  GstAnalyticsMtd mtd;
+  gboolean ret;
+  gchar *tag;
+  gfloat conf_lvl[] = { 0.7f };
+  GQuark class_quarks[1];
+  gpointer state = NULL;
+
+  class_quarks[0] = g_quark_from_string ("car");
+
+  buf = gst_buffer_new ();
+  rmeta = gst_buffer_add_analytics_relation_meta (buf);
+
+  GQuark type = g_quark_from_string ("car");
+  ret = gst_analytics_relation_meta_add_od_mtd (rmeta, type, 5, 10, 50, 60,
+      0.85f, &od_mtd);
+  fail_unless (ret == TRUE);
+
+  ret = gst_analytics_relation_meta_add_cls_mtd (rmeta, 1, conf_lvl,
+      class_quarks, &cls_mtd);
+  fail_unless (ret == TRUE);
+
+  gst_analytics_mtd_set_semantic_tag ((GstAnalyticsMtd *) & od_mtd,
+      "detector/ssd");
+  gst_analytics_mtd_set_semantic_tag ((GstAnalyticsMtd *) & cls_mtd,
+      "classifier/resnet");
+
+  /* Copy to new buffer */
+  buf2 = gst_buffer_new ();
+  ret = gst_buffer_copy_into (buf2, buf, GST_BUFFER_COPY_META, 0, -1);
+  fail_unless (ret == TRUE);
+
+  rmeta2 = gst_buffer_get_analytics_relation_meta (buf2);
+  fail_unless (rmeta2 != NULL);
+  fail_unless_equals_int (gst_analytics_relation_get_length (rmeta2), 2);
+
+  /* Check first mtd (OD) */
+  ret = gst_analytics_relation_meta_iterate (rmeta2, &state,
+      GST_ANALYTICS_MTD_TYPE_ANY, &mtd);
+  fail_unless (ret == TRUE);
+  tag = gst_analytics_mtd_get_semantic_tag (&mtd);
+  fail_unless_equals_string (tag, "detector/ssd");
+  g_free (tag);
+
+  /* Check second mtd (CLS) */
+  ret = gst_analytics_relation_meta_iterate (rmeta2, &state,
+      GST_ANALYTICS_MTD_TYPE_ANY, &mtd);
+  fail_unless (ret == TRUE);
+  tag = gst_analytics_mtd_get_semantic_tag (&mtd);
+  fail_unless_equals_string (tag, "classifier/resnet");
+  g_free (tag);
+
+  gst_buffer_unref (buf);
+  gst_buffer_unref (buf2);
+}
+
+GST_END_TEST;
+
+static Suite *
+analyticmeta_suite (void)
+{
+
+  Suite *s;
+  TCase *tc_chain_cls;
+  TCase *tc_chain_relation;
+  TCase *tc_chain_od;
+  TCase *tc_chain_od_cls;
+  TCase *tc_chain_tracking;
+  TCase *tc_chain_segmentation;
+  TCase *tc_chain_util;
+  TCase *tc_chain_tensors;
+  TCase *tc_chain_tensor_mtd;
+  TCase *tc_chain_group;
+  TCase *tc_chain_keypoint;
+  TCase *tc_chain_semantic_tag;
+
+  s = suite_create ("Analytic Meta Library");
+
+  tc_chain_cls = tcase_create ("Classification Mtd");
+  suite_add_tcase (s, tc_chain_cls);
+  tcase_add_test (tc_chain_cls, test_add_classification_meta);
+  tcase_add_test (tc_chain_cls, test_classification_meta_classes);
+
+  tcase_add_test (tc_chain_cls, test_meta_pooled);
+
+  tc_chain_relation = tcase_create ("Relation Meta");
+  suite_add_tcase (s, tc_chain_relation);
+  tcase_add_test (tc_chain_relation, test_add_relation_meta);
+  tcase_add_test (tc_chain_relation,
+      test_add_relation_inefficiency_reporting_cases);
+  tcase_add_test (tc_chain_relation, test_query_relation_meta_cases);
+  tcase_add_test (tc_chain_relation, test_path_relation_meta);
+  tcase_add_test (tc_chain_relation, test_cyclic_relation_meta);
+  tcase_add_test (tc_chain_relation, test_verify_mtd_clear);
+  tcase_add_test (tc_chain_relation, test_copy_metas);
+
+  tc_chain_od = tcase_create ("Object Detection Mtd");
+  suite_add_tcase (s, tc_chain_od);
+  tcase_add_test (tc_chain_od, test_add_od_meta);
+  tcase_add_test (tc_chain_od, test_add_oriented_od_meta);
+  tcase_add_test (tc_chain_od, test_od_meta_fields);
+  tcase_add_test (tc_chain_od, test_oriented_od_meta_fields);
+  tcase_add_test (tc_chain_od,
+      test_add_non_oriented_get_oriented_od_meta_fields);
+  tcase_add_test (tc_chain_od,
+      test_add_oriented_get_non_oriented_od_meta_fields);
+
+  tc_chain_od_cls = tcase_create ("Object Detection <-> Classification Mtd");
+  suite_add_tcase (s, tc_chain_od_cls);
+  tcase_add_test (tc_chain_od_cls, test_od_cls_relation);
+  tcase_add_test (tc_chain_od_cls, test_multi_od_cls_relation);
+
+  tc_chain_tracking = tcase_create ("Tracking Mtd");
+  suite_add_tcase (s, tc_chain_tracking);
+  tcase_add_test (tc_chain_tracking, test_add_tracking_meta);
+  tcase_add_test (tc_chain_tracking, test_od_trk_relation);
+
+  tc_chain_segmentation = tcase_create ("Segmentation Mtd");
+  suite_add_tcase (s, tc_chain_segmentation);
+  tcase_add_test (tc_chain_segmentation, test_add_segmentation_meta);
+  tcase_add_test (tc_chain_segmentation, test_associate_segmentation_meta);
+
+  tc_chain_util = tcase_create ("Utility");
+  suite_add_tcase (s, tc_chain_util);
+  tcase_add_test (tc_chain_util, test_iou_int);
+  tcase_add_test (tc_chain_util, test_iou_float);
+
+  tc_chain_tensors = tcase_create ("TensorMeta");
+  suite_add_tcase (s, tc_chain_tensors);
+  tcase_add_test (tc_chain_tensors, test_get_tensor);
+
+  tc_chain_tensor_mtd = tcase_create ("Tensor Mtd");
+  suite_add_tcase (s, tc_chain_tensor_mtd);
+  tcase_add_test (tc_chain_tensor_mtd, test_add_tensor_mtd);
+
+  tc_chain_group = tcase_create ("Group Mtd");
+  suite_add_tcase (s, tc_chain_group);
+  tcase_add_test (tc_chain_group, test_add_group_mtd_with_size);
+  tcase_add_test (tc_chain_group, test_add_group_mtd_dynamic);
+  tcase_add_test (tc_chain_group, test_group_mtd_get_member);
+  tcase_add_test (tc_chain_group, test_group_mtd_semantic_tag);
+  tcase_add_test (tc_chain_group, test_group_mtd_semantic_tag_has_prefix);
+  tcase_add_test (tc_chain_group, test_group_mtd_retrieval);
+  tcase_add_test (tc_chain_group, test_group_mtd_with_relations);
+  tcase_add_test (tc_chain_group, test_group_mtd_iterate_all);
+  tcase_add_test (tc_chain_group, test_group_mtd_iterate_with_type_filter);
+  tcase_add_test (tc_chain_group, test_group_mtd_iterate_empty);
+  tcase_add_test (tc_chain_group, test_group_mtd_iterate_member_data);
+
+  tc_chain_keypoint = tcase_create ("Keypoint Mtd");
+  suite_add_tcase (s, tc_chain_keypoint);
+  tcase_add_test (tc_chain_keypoint, test_add_keypoint_mtd_2d);
+  tcase_add_test (tc_chain_keypoint, test_add_keypoint_mtd_3d);
+  tcase_add_test (tc_chain_keypoint, test_keypoint_mtd_retrieval);
+  tcase_add_test (tc_chain_keypoint, test_add_keypoints_group_without_skeleton);
+  tcase_add_test (tc_chain_keypoint, test_add_keypoints_group_with_skeleton);
+  tcase_add_test (tc_chain_keypoint, test_keypoints_group_hand_pose);
+  tcase_add_test (tc_chain_keypoint, test_keypoints_group_iteration);
+  tcase_add_test (tc_chain_keypoint, test_keypoints_group_with_confidences);
+  tcase_add_test (tc_chain_keypoint, test_keypoints_group_without_confidences);
+  tcase_add_test (tc_chain_keypoint, test_keypoint_group_2d_vs_3d);
+
+  tc_chain_semantic_tag = tcase_create ("Semantic Tag");
+  suite_add_tcase (s, tc_chain_semantic_tag);
+  tcase_add_test (tc_chain_semantic_tag, test_mtd_semantic_tag_on_od);
+  tcase_add_test (tc_chain_semantic_tag, test_mtd_semantic_tag_on_cls);
+  tcase_add_test (tc_chain_semantic_tag, test_mtd_semantic_tag_on_tracking);
+  tcase_add_test (tc_chain_semantic_tag,
+      test_mtd_semantic_tag_multiple_on_same_buffer);
+  tcase_add_test (tc_chain_semantic_tag, test_mtd_semantic_tag_survives_copy);
+
+  return s;
+}
+
+GST_CHECK_MAIN (analyticmeta);

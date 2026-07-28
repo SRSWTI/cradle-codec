@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GstDots</title>
+    <link rel="icon" type="image/png" href="/images/favicon-16.png" sizes="16x16">
+    <link rel="icon" type="image/png" href="/images/favicon-32.png" sizes="32x32">
+    <link rel="icon" type="image/png" href="/images/favicon-57.png" sizes="57x57">
+    <link rel="icon" type="image/png" href="/images/favicon-64.png" sizes="64x64">
+    <link rel="icon" type="image/png" href="/images/favicon-76.png" sizes="76x76">
+    <link rel="icon" type="image/png" href="/images/favicon-96.png" sizes="96x96">
+    <link rel="icon" type="image/png" href="/images/favicon-128.png" sizes="128x128">
+    <link rel="icon" type="image/png" href="/images/favicon-192.png" sizes="192x192">
+    <link rel="icon" type="image/png" href="/images/favicon-228.png" sizes="228x228">
+
+    <script src="/dist/bundle.js"></script>
+    <link rel="stylesheet" href="/css/graphviz.svg.css">
+  </head>
+
+  <style>
+    html, body {
+      overscroll-behavior-x: none;
+    }
+
+    body {
+        margin: 0;
+        font-family: 'Lato', sans-serif;
+        text-align: center;
+        background-color: #1a1a1a;
+        color: #e0e0e0;
+    }
+
+    h1 {
+        color: #ffffff;
+    }
+
+    .instructions {
+        color: #e0e0e0;
+        position: absolute;
+        z-index: 100;
+        bottom: 0px;
+        left: 0px;
+    }
+
+    .preview {
+      width: -webkit-fill-available;
+      width: -moz-available;
+      max-height: 40vh;
+      overflow: hidden;
+    }
+
+    .preview svg {
+      width: 100%;
+      height: auto;
+      max-height: 40vh;
+    }
+
+    .overlay {
+        height: 100%;
+        width: 100%;
+        position: fixed;
+        z-index: 1;
+        top: 0;
+        left: 0;
+        background-color: rgba(0,0,0, 0.95);
+        overflow-x: hidden;
+        transition: 0.5s;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .overlay-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 16px;
+        flex-shrink: 0;
+    }
+
+    .overlay-header h2 {
+        margin: 0;
+        font-size: 1rem;
+        color: #e0e0e0;
+    }
+
+    .overlay .closebtn {
+        font-size: 30px;
+        color: #a0a0a0;
+        cursor: pointer;
+        text-decoration: none;
+        padding: 0 8px;
+        transition: 0.3s;
+    }
+
+    .overlay .closebtn:hover {
+        color: #ffffff;
+    }
+
+    .overlay-content {
+        flex: 1;
+        display: flex;
+        width: 100%;
+        overflow: hidden;
+    }
+
+    #graph {
+        flex: 1;
+        overflow: hidden;
+    }
+
+    #graph svg {
+        width: 100%;
+        height: 100%;
+    }
+
+    .overlay-instructions {
+        position: fixed;
+        bottom: 10px;
+        left: 10px;
+        color: #e0e0e0;
+        font-size: 12px;
+        text-align: left;
+    }
+
+    .overlay-actions {
+        position: fixed;
+        bottom: 10px;
+        right: 10px;
+    }
+
+    .overlay-actions button {
+        background-color: #2a2a2a;
+        color: #e0e0e0;
+        border: 1px solid #404040;
+        padding: 6px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+    }
+
+    .overlay-actions button:hover {
+        background-color: #3a3a3a;
+    }
+
+    .custom-tooltip {
+        position: absolute;
+        background-color: #333;
+        color: white;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+        z-index: 10000;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.2s;
+        max-width: 600px;
+        word-break: break-word;
+        white-space: pre-wrap;
+        font-family: monospace;
+        text-align: left;
+        user-select: text;
+        -webkit-user-select: text;
+        -moz-user-select: text;
+        -ms-user-select: text;
+    }
+
+    .custom-tooltip.show {
+        opacity: 1;
+    }
+
+    .custom-tooltip.interactive {
+        pointer-events: auto;
+        cursor: text;
+        border: 2px solid #555;
+    }
+
+    .custom-tooltip.interactive::after {
+        content: " (Text selected - Ctrl+C to copy)";
+        font-size: 10px;
+        color: #aaa;
+        font-style: italic;
+    }
+
+    input[type="text"] {
+        background-color: #2a2a2a;
+        color: #e0e0e0;
+        border: 1px solid #404040;
+        padding: 8px;
+        border-radius: 4px;
+        margin: 10px 0;
+    }
+
+    input[type="text"]::placeholder {
+        color: #808080;
+    }
+
+    input[type="text"]:focus {
+        outline: none;
+        border-color: #0069ff;
+    }
+
+    button {
+        background-color: #2a2a2a;
+        color: #e0e0e0;
+        border: 1px solid #404040;
+        padding: 8px 16px;
+        border-radius: 4px;
+        margin: 10px 0;
+        cursor: pointer;
+    }
+
+    button:hover {
+        background-color: #3a3a3a;
+        border-color: #505050;
+    }
+
+    button:active {
+        background-color: #404040;
+    }
+
+    @media screen and (max-height: 250000px) {
+      .overlay .closebtn {
+        text-align: right;
+        font-size: 20px;
+      }
+    }
+
+    input[type='checkbox'] { display: none; }
+    .wrap-collabsible { margin: 1.2rem 0; }
+    .lbl-toggle {
+        display: block;
+        font-weight: bold;
+        font-family: monospace;
+        font-size: 1.2rem;
+        text-transform: uppercase;
+        text-align: center;
+        padding: 1rem;
+        color: #ffffff;
+        background: #1a4c9e;
+        cursor: pointer;
+        border-radius: 7px;
+        transition: all 0.25s ease-out;
+    }
+    .lbl-toggle:hover { background: #2161c9; }
+    .lbl-toggle::before {
+        content: ' ';
+        display: inline-block;
+        border-top: 5px solid transparent;
+        border-bottom: 5px solid transparent;
+        border-left: 5px solid currentColor;
+        vertical-align: middle;
+        margin-right: .7rem;
+        transform: translateY(-2px);
+        transition: transform .2s ease-out;
+    }
+    .toggle:checked+.lbl-toggle::before { transform: rotate(90deg) translateX(-3px); }
+    .collapsible-content {
+        max-height: 0px;
+        overflow: hidden;
+        transition: max-height .25s ease-in-out;
+    }
+    .toggle:checked + .lbl-toggle + .collapsible-content { max-height: 999999999px; }
+    .toggle:checked+.lbl-toggle { border-bottom-right-radius: 0; border-bottom-left-radius: 0; }
+    .collapsible-content .content-inner {
+        background: rgba(26, 76, 158, 0.2);
+        border-bottom: 1px solid rgba(26, 76, 158, 0.45);
+        border-bottom-left-radius: 7px;
+        border-bottom-right-radius: 7px;
+        padding: .5rem 1rem;
+    }
+    .collapsible-content p { margin-bottom: 0; }
+  </style>
+
+  <script src="/js/tooltip.js"></script>
+  <script src="/js/pipeline-navigation.js"></script>
+  <script src="/js/text-ellipsizer.js"></script>
+  <script src="/js/svg-overlay-manager.js"></script>
+
+  <script src="/js/gstdots.js" type="module"> </script>
+  <script type="module">
+    import {updateFromUrl, connectWs, connectSearch, removePipelineOverlay,  dumpPipelines } from '/js/gstdots.js';
+
+    window.addEventListener('popstate', function(event) {
+      updateFromUrl(true);
+    });
+
+    document.addEventListener("DOMContentLoaded", function() {
+      connectWs();
+      connectSearch();
+      updateFromUrl(true);
+
+      document.getElementById('dump-button').addEventListener('click', dumpPipelines);
+    });
+
+    document.addEventListener('keyup', function(e) {
+      if (e.key === 'Escape') {
+        removePipelineOverlay();
+      } else if (e.key === '/' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+        e.preventDefault();
+        document.getElementById('search').focus();
+      }
+    });
+
+    /* ── SVG theme toggle ──────────────────────────────────────────── */
+    (function() {
+      const btn = document.getElementById('svg-theme-btn');
+      const STORAGE_KEY = 'svg-theme';
+      function applyTheme(light) {
+        document.body.classList.toggle('svg-light-theme', light);
+        btn.textContent = light ? '🌙 Dark SVGs' : '☀ Light SVGs';
+      }
+      applyTheme(localStorage.getItem(STORAGE_KEY) === 'light');
+      btn.addEventListener('click', function() {
+        const light = !document.body.classList.contains('svg-light-theme');
+        localStorage.setItem(STORAGE_KEY, light ? 'light' : 'dark');
+        applyTheme(light);
+      });
+    })();
+  </script>
+
+  <body>
+    <h1>GStreamer Pipeline graphs</h1>
+
+    <div>
+      <input type="text" id="search" placeholder="Search for pipeline">
+      <button id="dump-button">Dump Pipelines</button>
+      <button id="svg-theme-btn" style="margin-left: 10px;">☀ Light SVGs</button>
+      <a href="/pipeline.html" style="margin-left: 10px; color: #a0a0ff; text-decoration: none;">Pipeline Viewer</a>
+    </div>
+
+    <div id="pipelines"></div>
+  </body>
+</html>

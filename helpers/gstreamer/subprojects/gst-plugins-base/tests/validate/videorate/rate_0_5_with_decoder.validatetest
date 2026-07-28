@@ -1,0 +1,4 @@
+# Using an encoder/decoder to test QoS handling
+set-globals, rate=(string)"0.5", num_buffers=(string)5, n_cranks_to_eos=(string)1
+
+include, location="check-rate-prop-with-decoder.meta"

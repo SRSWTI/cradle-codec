@@ -1,0 +1,380 @@
+/* GStreamer
+ * Copyright (C) 2019 Josh Matthews <josh@joshmatthews.net>
+ *
+ * avfdeviceprovider.c: AVF device probing and monitoring
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Library General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Library General Public License for more details.
+ *
+ * You should have received a copy of the GNU Library General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <TargetConditionals.h>
+#import <AVFoundation/AVFoundation.h>
+#if TARGET_OS_OSX
+#import <AppKit/AppKit.h>
+#endif
+#include "avfvideosrc.h"
+#include "avfdeviceprovider.h"
+#include "helpers.h"
+
+#include <string.h>
+
+#include <gst/gst.h>
+
+static GstDevice *gst_avf_device_new (const gchar * device_name,
+                                      const gchar * unique_id,
+                                      GstCaps * caps,
+                                      GstAvfDeviceType type,
+                                      GstStructure *props);
+G_DEFINE_TYPE (GstAVFDeviceProvider, gst_avf_device_provider,
+               GST_TYPE_DEVICE_PROVIDER);
+
+GST_DEVICE_PROVIDER_REGISTER_DEFINE (avfdeviceprovider, "avfdeviceprovider",
+    GST_RANK_PRIMARY, GST_TYPE_AVF_DEVICE_PROVIDER);
+
+static GList *gst_avf_device_provider_probe (GstDeviceProvider * provider);
+
+static void
+gst_avf_device_provider_class_init (GstAVFDeviceProviderClass * klass)
+{
+  GstDeviceProviderClass *dm_class = GST_DEVICE_PROVIDER_CLASS (klass);
+
+  // TODO: Add start/stop callbacks to receive device notifications.
+  // https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/886
+  dm_class->probe = gst_avf_device_provider_probe;
+
+  gst_avf_video_src_debug_init ();
+
+  gst_device_provider_class_set_static_metadata (dm_class,
+                                                 "AVF Device Provider", "Source/Video/Monitor",
+                                                 "List and provide AVF source devices",
+                                                 "Josh Matthews <josh@joshmatthews.net>");
+}
+
+static void
+gst_avf_device_provider_init (GstAVFDeviceProvider * self)
+{
+}
+
+static GstStructure *
+gst_av_capture_device_get_props (AVCaptureDevice *device)
+{
+  char *unique_id, *model_id;
+  GstStructure *props = gst_structure_new_empty ("avf-proplist");
+
+  unique_id = g_strdup ([[device uniqueID] UTF8String]);
+  model_id = g_strdup ([[device modelID] UTF8String]);
+
+  gst_structure_set (props,
+    "device.api", G_TYPE_STRING, "avf",
+    "avf.unique_id", G_TYPE_STRING, unique_id,
+    "avf.model_id", G_TYPE_STRING, model_id,
+    "avf.has_flash", G_TYPE_BOOLEAN, [device hasFlash],
+    "avf.has_torch", G_TYPE_BOOLEAN, [device hasTorch],
+  NULL);
+
+  g_free (unique_id);
+  g_free (model_id);
+
+#if !TARGET_OS_WATCH
+#if MAC_OS_X_VERSION_MAX_ALLOWED < 140000
+  if (__builtin_available (macOS 10.9, iOS 14.0, tvOS 17.0, *)) {
+#else
+  if (__builtin_available (macOS 10.9, iOS 14.0, tvOS 17.0, visionOS 2.1, *)) {
+#endif
+    char *manufacturer = g_strdup ([[device manufacturer] UTF8String]);
+    gst_structure_set (props,
+      "avf.manufacturer", G_TYPE_STRING, manufacturer,
+    NULL);
+    g_free (manufacturer);
+  }
+#endif
+
+  return props;
+}
+
+#if TARGET_OS_OSX
+static GstStructure *
+gst_avf_screen_get_props (CGDirectDisplayID display_id, const gchar * unique_id)
+{
+  GstStructure *props = gst_structure_new_empty ("avf-proplist");
+
+  gst_structure_set (props,
+      "device.api", G_TYPE_STRING, "avf",
+      "avf.unique_id", G_TYPE_STRING, unique_id,
+      "avf.capture_screen", G_TYPE_BOOLEAN, TRUE,
+      "avf.display_id", G_TYPE_UINT64, (guint64) display_id,
+      NULL);
+
+  return props;
+}
+
+static GstCaps *
+gst_avf_screen_get_caps (NSScreen * screen, AVCaptureVideoDataOutput * output)
+{
+  CGDirectDisplayID display_id;
+  gdouble scale;
+
+  g_return_val_if_fail (screen != nil, NULL);
+  g_return_val_if_fail (output != nil, NULL);
+
+  display_id = gst_avf_screen_get_display_id (screen);
+  scale = [screen backingScaleFactor];
+
+  return gst_av_capture_screen_get_caps (display_id, scale, output);
+}
+#endif
+
+static GList *
+gst_avf_device_provider_probe (GstDeviceProvider * provider)
+{
+  GList *result;
+
+  result = NULL;
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+  NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
+G_GNUC_END_IGNORE_DEPRECATIONS
+  AVCaptureVideoDataOutput *output = [[AVCaptureVideoDataOutput alloc] init];
+  for (AVCaptureDevice *device in devices) {
+    g_assert (device != nil);
+
+    GstCaps *caps = gst_av_capture_device_get_caps (device, output,
+        GST_AVF_VIDEO_SOURCE_ORIENTATION_DEFAULT);
+    GstStructure *props = gst_av_capture_device_get_props (device);
+    const gchar *unique_id = gst_structure_get_string (props, "avf.unique_id");
+    const gchar *deviceName = [[device localizedName] UTF8String];
+    GstDevice *gst_device = gst_avf_device_new (deviceName, unique_id, caps,
+        GST_AVF_DEVICE_TYPE_VIDEO_SOURCE, props);
+
+    result = g_list_prepend (result, gst_object_ref_sink (gst_device));
+
+    gst_structure_free (props);
+    gst_caps_unref (caps);
+  }
+
+#if TARGET_OS_OSX
+  for (NSScreen *screen in [NSScreen screens]) {
+    CGDirectDisplayID display_id = gst_avf_screen_get_display_id (screen);
+    gchar *unique_id = gst_avf_screen_dup_unique_id (display_id);
+    gchar *display_name;
+    GstCaps *caps;
+    GstStructure *props;
+    GstDevice *gst_device;
+
+    if (unique_id == NULL)
+      continue;
+
+    display_name = gst_avf_screen_dup_name (screen, display_id);
+    caps = gst_avf_screen_get_caps (screen, output);
+    props = gst_avf_screen_get_props (display_id, unique_id);
+    gst_device = gst_avf_device_new (display_name, unique_id, caps,
+        GST_AVF_DEVICE_TYPE_SCREEN_SOURCE, props);
+
+    result = g_list_prepend (result, gst_object_ref_sink (gst_device));
+
+    g_free (display_name);
+    g_free (unique_id);
+    gst_structure_free (props);
+    gst_caps_unref (caps);
+  }
+#endif
+
+  result = g_list_reverse (result);
+
+  return result;
+}
+
+enum
+{
+  PROP_DEVICE_INDEX = 1,
+  PROP_UNIQUE_ID,
+};
+
+G_DEFINE_TYPE (GstAvfDevice, gst_avf_device, GST_TYPE_DEVICE);
+
+static GstElement *gst_avf_device_create_element (GstDevice * device,
+                                                 const gchar * name);
+static gboolean gst_avf_device_reconfigure_element (GstDevice * device,
+                                                   GstElement * element);
+
+static void gst_avf_device_get_property (GObject * object, guint prop_id,
+                                         GValue * value, GParamSpec * pspec);
+static void gst_avf_device_set_property (GObject * object, guint prop_id,
+                                         const GValue * value, GParamSpec * pspec);
+static void gst_avf_device_finalize (GObject * object);
+
+static void
+gst_avf_device_class_init (GstAvfDeviceClass * klass)
+{
+  GstDeviceClass *dev_class = GST_DEVICE_CLASS (klass);
+  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+
+  dev_class->create_element = gst_avf_device_create_element;
+  dev_class->reconfigure_element = gst_avf_device_reconfigure_element;
+
+  object_class->finalize = gst_avf_device_finalize;
+  object_class->get_property = gst_avf_device_get_property;
+  object_class->set_property = gst_avf_device_set_property;
+
+  g_object_class_install_property (object_class, PROP_DEVICE_INDEX,
+      g_param_spec_int ("device-index", "Device Index",
+          "The zero-based device index (deprecated, non-functional)",
+          -1, G_MAXINT, -1,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+          G_PARAM_CONSTRUCT_ONLY | G_PARAM_DEPRECATED));
+  g_object_class_install_property (object_class, PROP_UNIQUE_ID,
+      g_param_spec_string ("unique-id", "Unique ID",
+          "Stable unique identifier of the AVF capture source", NULL,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT_ONLY));
+}
+
+static void
+gst_avf_device_init (GstAvfDevice * device)
+{
+}
+
+static void
+gst_avf_device_finalize (GObject * object)
+{
+  GstAvfDevice *device = GST_AVF_DEVICE_CAST (object);
+
+  g_clear_pointer (&device->unique_id, g_free);
+
+  G_OBJECT_CLASS (gst_avf_device_parent_class)->finalize (object);
+}
+
+static GstElement *
+gst_avf_device_create_element (GstDevice * device, const gchar * name)
+{
+  GstAvfDevice *avf_dev = GST_AVF_DEVICE (device);
+  GstElement *elem;
+  elem = gst_element_factory_make (avf_dev->element, name);
+  if (avf_dev->type == GST_AVF_DEVICE_TYPE_SCREEN_SOURCE) {
+    g_object_set (elem,
+        "capture-screen", TRUE,
+        "unique-id", avf_dev->unique_id,
+        NULL);
+  } else {
+    g_object_set (elem, "unique-id", avf_dev->unique_id, NULL);
+  }
+
+  return elem;
+}
+
+static gboolean
+gst_avf_device_reconfigure_element (GstDevice * device, GstElement * element)
+{
+  GstAvfDevice *avf_dev = GST_AVF_DEVICE (device);
+  if (!strcmp (avf_dev->element, "avfvideosrc") && GST_IS_AVF_VIDEO_SRC (element)) {
+    if (avf_dev->type == GST_AVF_DEVICE_TYPE_SCREEN_SOURCE) {
+      g_object_set (element,
+          "capture-screen", TRUE,
+          "unique-id", avf_dev->unique_id,
+          NULL);
+    } else {
+      g_object_set (element, "unique-id", avf_dev->unique_id, NULL);
+    }
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+static void
+gst_avf_device_get_property (GObject * object, guint prop_id,
+                             GValue * value, GParamSpec * pspec)
+{
+  GstAvfDevice *device;
+
+  device = GST_AVF_DEVICE_CAST (object);
+
+  switch (prop_id) {
+    case PROP_DEVICE_INDEX:
+      g_value_set_int (value, -1);
+      break;
+    case PROP_UNIQUE_ID:
+      g_value_set_string (value, device->unique_id);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
+gst_avf_device_set_property (GObject * object, guint prop_id,
+                             const GValue * value, GParamSpec * pspec)
+{
+  GstAvfDevice *device;
+
+  device = GST_AVF_DEVICE_CAST (object);
+
+  switch (prop_id) {
+    case PROP_DEVICE_INDEX:
+      if (g_value_get_int (value) != -1) {
+        g_warning ("The \"device-index\" property of GstAvfDevice is "
+            "deprecated and non-functional. Use \"unique-id\" instead.");
+      }
+      break;
+    case PROP_UNIQUE_ID:
+      g_free (device->unique_id);
+      device->unique_id = g_value_dup_string (value);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static GstDevice *
+gst_avf_device_new (const gchar * device_name, const gchar * unique_id,
+    GstCaps * caps, GstAvfDeviceType type,
+    GstStructure *props)
+{
+  GstAvfDevice *gstdev;
+  const gchar *element = NULL;
+  const gchar *klass = NULL;
+
+  g_return_val_if_fail (device_name, NULL);
+  g_return_val_if_fail (caps, NULL);
+
+
+  switch (type) {
+    case GST_AVF_DEVICE_TYPE_VIDEO_SOURCE:
+      element = "avfvideosrc";
+      klass = "Video/Source";
+      break;
+    case GST_AVF_DEVICE_TYPE_SCREEN_SOURCE:
+      element = "avfvideosrc";
+      klass = "Source/Monitor";
+      break;
+    default:
+      g_assert_not_reached ();
+      break;
+  }
+
+
+  gstdev = g_object_new (GST_TYPE_AVF_DEVICE,
+                         "display-name", device_name, "caps", caps, "device-class", klass,
+                         "unique-id", unique_id, "properties", props, NULL);
+
+  gstdev->type = type;
+  gstdev->element = element;
+
+  return GST_DEVICE (gstdev);
+}

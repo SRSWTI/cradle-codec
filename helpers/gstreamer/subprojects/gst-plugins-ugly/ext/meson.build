@@ -1,0 +1,5 @@
+subdir('a52dec')
+subdir('cdio')
+subdir('dvdread')
+subdir('sidplay')
+subdir('x264')

@@ -1,0 +1,9 @@
+GStreamer is currently maintained by the consensus of a number
+of people. The current list of maintainers is the developers, maintainers
+and owners in the GitLab GStreamer project at:
+
+https://gitlab.freedesktop.org/groups/gstreamer/-/group_members
+
+Maintainer-related issues should be addressed to:
+
+  gstreamer-devel@lists.freedesktop.org

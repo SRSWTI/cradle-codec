@@ -1,0 +1,16 @@
+.venv/
+.matryoshka/
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+.cradle-codec/
+*.kvcodec/
+live-vllm-lmcache-logs/
+
+# Local miscellaneous artifacts and production media.
+/misc/

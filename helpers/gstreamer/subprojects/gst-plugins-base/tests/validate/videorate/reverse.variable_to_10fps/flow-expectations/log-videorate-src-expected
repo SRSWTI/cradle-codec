@@ -1,0 +1,32 @@
+event stream-start: GstEventStreamStart, flags=(GstStreamFlags)GST_STREAM_FLAG_NONE, group-id=(uint)1;
+event caps: video/x-raw, format=(string)I420, framerate=(fraction)10/1, height=(int)240, interlace-mode=(string)progressive, multiview-mode=(string)mono, pixel-aspect-ratio=(fraction)1/1, width=(int)320;
+event segment: format=TIME, start=0:00:00.000000000, offset=0:00:00.000000000, stop=none, time=0:00:00.000000000, base=0:00:00.000000000, position=0:00:00.000000000
+buffer: checksum=5074004a070c85d97cc9f58fab273813c95b748c, pts=0:00:00.000000000, dur=0:00:00.100000000, flags=discont
+event flush-start: (no structure)
+event flush-stop: GstEventFlushStop, reset-time=(boolean)true;
+event segment: format=TIME, start=0:00:00.000000000, offset=0:00:00.000000000, stop=0:00:01.000000000, rate=-1.000000, flags=0x01, time=0:00:00.000000000, base=0:00:00.000000000, position=0:00:01.000000000
+buffer: checksum=012c04214b70c28c823991e5502c0dde653e576e, pts=0:00:00.900000000, dur=0:00:00.100000000, flags=discont
+buffer: checksum=31aabb7c75b036bbbd9495a84647959b336d484b, pts=0:00:00.800000000, dur=0:00:00.100000000
+buffer: checksum=58936846a7314b141f0bc1d1ff1e9d46db961633, pts=0:00:00.700000000, dur=0:00:00.100000000
+buffer: checksum=1b8c20d6b674124d076db71daa1854de266b0365, pts=0:00:00.600000000, dur=0:00:00.100000000
+buffer: checksum=1e677a53b1ce72bf11b301041c7cd62602f57cea, pts=0:00:00.500000000, dur=0:00:00.100000000
+buffer: checksum=997ee2608af57157beeba316c6e4058d904af854, pts=0:00:00.400000000, dur=0:00:00.100000000
+buffer: checksum=e9424eca5674294ba9ba8ee81714f7c6cb45f480, pts=0:00:00.300000000, dur=0:00:00.100000000
+buffer: checksum=d0a85177ea2e35014a69c6290895090c9cdd6af4, pts=0:00:00.200000000, dur=0:00:00.100000000
+buffer: checksum=9667d1b1eb52d9463353a8cb854546b9e9c5fc32, pts=0:00:00.100000000, dur=0:00:00.100000000
+buffer: checksum=1f55031a355611378b894de9e91f15b7aadb9762, pts=0:00:00.000000000, dur=0:00:00.100000000
+event eos: (no structure)
+event flush-start: (no structure)
+event flush-stop: GstEventFlushStop, reset-time=(boolean)true;
+event segment: format=TIME, start=0:00:01.000000000, offset=0:00:00.000000000, stop=0:00:02.000000000, rate=-1.000000, flags=0x01, time=0:00:01.000000000, base=0:00:00.000000000, position=0:00:02.000000000
+buffer: checksum=12743d9ab352a75f9100424ad43f70d01fbfaee9, pts=0:00:01.900000000, dur=0:00:00.100000000, flags=discont
+buffer: checksum=b4522d1e8a6e89d34e546885f450d0fc4106e711, pts=0:00:01.800000000, dur=0:00:00.100000000
+buffer: checksum=0afa5c0d00ac4bfe6309ae945aaf800437f69dd6, pts=0:00:01.700000000, dur=0:00:00.100000000
+buffer: checksum=5fb7222253c7d78c891979cdfa2c079eb2fba90f, pts=0:00:01.600000000, dur=0:00:00.100000000
+buffer: checksum=6f2d5d8f9551083a65889a7d7b87e25348612604, pts=0:00:01.500000000, dur=0:00:00.100000000
+buffer: checksum=e085fff613289df868f63ca7142ce0d342ab3d4c, pts=0:00:01.400000000, dur=0:00:00.100000000
+buffer: checksum=33710a6238592d081550f74836533f8caf51cc0f, pts=0:00:01.300000000, dur=0:00:00.100000000
+buffer: checksum=e1d19911a0a9b7a6a97dceedc96c66f81d187591, pts=0:00:01.200000000, dur=0:00:00.100000000
+buffer: checksum=8eed8ee03cf63e698bfa301fa0b304addffed4bc, pts=0:00:01.100000000, dur=0:00:00.100000000
+buffer: checksum=f0f7021ee092b8f273ca5cec2d1acefebfb53356, pts=0:00:01.000000000, dur=0:00:00.100000000
+event eos: (no structure)

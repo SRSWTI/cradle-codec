@@ -1,0 +1,206 @@
+{
+   <suppression for libneon-25.5dfsg5 on tpm's edgy/x86>
+   Memcheck:Param
+   socketcall.sendto(msg)
+   fun:sendto
+   fun:getaddrinfo
+   fun:ne_addr_resolve
+   fun:ne_begin_request
+}
+
+{
+   <Soundtouch valgrind warning>
+   Memcheck:Cond
+   fun:_ZN10soundtouch9TDStretch8setTempoEf
+   fun:_ZN10soundtouch9TDStretch13setParametersEjjjj
+   fun:_ZN10soundtouch9TDStretchC1Ev
+   fun:_ZN10soundtouch9TDStretch11newInstanceEv
+   fun:_ZN10soundtouch10SoundTouchC1Ev
+}
+
+{
+   <Soundtouch valgrind warning>
+   Memcheck:Cond
+   fun:_ZN10soundtouch9TDStretch8setTempoEf
+   fun:_ZN10soundtouch9TDStretch13setParametersEjjjj
+   fun:_ZN10soundtouch9TDStretchC1Ev
+   fun:_ZN10soundtouch9TDStretch11newInstanceEv
+   fun:_ZN10soundtouch10SoundTouchC1Ev
+}
+
+{
+   <the LADSPA sine plugin produces this on every exit() it seems >
+   Memcheck:Free
+   fun:_ZdaPv
+   obj:/usr/lib/ladspa/sine.so
+}
+
+{
+   Issues in srt library, variant 1
+   Memcheck:Param
+   sendmsg(msg.msg_control)
+   fun:sendmsg
+   fun:_ZNK3srt8CChannel6sendtoERKNS_12sockaddr_anyERNS_7CPacketES3_
+}
+
+{
+   Issues in srt library, variant 2
+   Memcheck:Param
+   sendmsg(msg.msg_control)
+   fun:_ZNK3srt8CChannel6sendtoERKNS_12sockaddr_anyERNS_7CPacketES3_
+}
+
+{
+   Issues in srt library, variant 2
+   Memcheck:Param
+   sendmsg(msg.msg_control)
+   fun:__libc_sendmsg
+   fun:sendmsg
+   fun:_ZNK3srt8CChannel6sendtoERKNS_12sockaddr_anyERNS_7CPacketES3_
+}
+
+{
+   Issues in srt library
+   Memcheck:Cond
+   fun:_ZN3srt4CUDT11sendCtrlAckERNS_7CPacketEi
+}
+
+{
+   <leak in libsrt: 0x1091BE46: _sub_I_65535_0.0 (in /usr/lib64/libsrt.so.1.5.4)>
+   Memcheck:Leak
+   fun:_Znwm
+   fun:_sub_I_65535_0.0
+   fun:call_init
+   fun:call_init
+   fun:_dl_init
+   fun:_dl_catch_exception
+   fun:dl_open_worker
+   fun:_dl_catch_exception
+   fun:_dl_open
+   fun:dlopen_doit
+   fun:_dl_catch_exception
+   fun:_dl_catch_error
+   fun:_dlerror_run
+   fun:dlopen_implementation
+   ...
+}
+
+
+{
+   <openssl_poll leaks all over the place atm, needs debugging>
+   Memcheck:Leak
+   match-leak-kinds: indirect,definite
+   fun:malloc
+   fun:CRYPTO_malloc
+   ...
+   fun:openssl_poll
+   ...
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: indirect,definite
+   fun:malloc
+   fun:CRYPTO_malloc
+   ...
+   fun:SSL_read
+   ...
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: indirect
+   fun:malloc
+   fun:CRYPTO_malloc
+   ...
+   fun:dtls1_read_bytes
+   fun:ssl3_read_internal.part.0
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: indirect,definite
+   fun:malloc
+   fun:CRYPTO_malloc
+   fun:CRYPTO_zalloc
+   fun:EVP_RAND_CTX_new
+   ...
+   fun:RSA_generate_multi_prime_key
+   fun:init_generated
+   ...
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: indirect,definite
+   fun:malloc
+   fun:CRYPTO_malloc
+   ...
+   fun:gst_dtls_certificate_set_property
+   ...
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: indirect
+   fun:malloc
+   fun:CRYPTO_malloc
+   ...
+   fun:srtp_crypto_kernel_init
+   fun:srtp_init
+   fun:srtp_element_init
+   fun:gst_element_register_srtpenc
+}
+{
+   <The OpenSSL version shipping in Fedora 40 leaks memory, the issue is fixed in F42>
+   Memcheck:Leak
+   match-leak-kinds: indirect
+   fun:malloc
+   fun:CRYPTO_malloc
+   ...
+   fun:tls1_change_cipher_state
+   fun:ossl_statem_client_post_work
+   fun:UnknownInlinedFun
+   fun:state_machine
+}
+{
+   <The OpenSSL version shipping in Fedora 40 leaks memory, the issue is fixed in F42>
+   Memcheck:Leak
+   match-leak-kinds: indirect
+   fun:malloc
+   fun:CRYPTO_malloc
+   ...
+   fun:ossl_ec_key_simple_generate_key
+   fun:ossl_ec_key_gen
+   fun:EC_KEY_generate_key
+}
+
+{
+   <Mesa llvmpipe 0 realloc error, see https://gitlab.freedesktop.org/mesa/mesa/-/issues/13539>
+   Memcheck:ReallocZero
+   fun:realloc
+   fun:llvmpipe_register_texture
+   fun:llvmpipe_create_image_handle
+   fun:lvp_CreateDevice
+   ...
+}
+
+{
+   <libvmaf svm uninitialised value>
+   Memcheck:Cond
+   ...
+   fun:svm_predict_values
+   fun:svm_predict
+   fun:vmaf_predict_score_at_index
+   ...
+}
+
+{
+   <libvmaf svm uninitialised value>
+   Memcheck:Value8
+   ...
+   fun:svm_predict_values
+   fun:svm_predict
+   fun:vmaf_predict_score_at_index
+   ...
+}

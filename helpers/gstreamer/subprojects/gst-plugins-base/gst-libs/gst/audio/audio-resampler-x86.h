@@ -1,0 +1,72 @@
+/* GStreamer
+ * Copyright (C) <2016> Wim Taymans <wim.taymans@gmail.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Library General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Library General Public License for more details.
+ *
+ * You should have received a copy of the GNU Library General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+ * Boston, MA 02110-1301, USA.
+ */
+
+#include <gst/gstinfo.h>
+#include <gst/gstcpuid.h>
+
+#include "audio-resampler-macros.h"
+#include "audio-resampler-x86-sse.h"
+#include "audio-resampler-x86-sse2.h"
+#include "audio-resampler-x86-sse41.h"
+
+static inline void
+audio_resampler_check_x86 (void)
+{
+  const gboolean cpuid_sse2 = gst_cpuid_supports_x86_sse2();
+  const gboolean cpuid_sse4_1 = gst_cpuid_supports_x86_sse4_1();
+
+  GST_LOG ("cpuid: [sse2=%x, sse4_1=%x]", cpuid_sse2, cpuid_sse4_1);
+  if (cpuid_sse2) {
+#ifdef HAVE_SSE2
+    GST_INFO ("enable SSE2 optimisations");
+    resample_gint16_full_1 = resample_gint16_full_1_sse2;
+    resample_gint16_linear_1 = resample_gint16_linear_1_sse2;
+    resample_gint16_cubic_1 = resample_gint16_cubic_1_sse2;
+
+    interpolate_gint16_linear = interpolate_gint16_linear_sse2;
+    interpolate_gint16_cubic = interpolate_gint16_cubic_sse2;
+
+    resample_gfloat_full_1 = resample_gfloat_full_1_sse;
+    resample_gfloat_linear_1 = resample_gfloat_linear_1_sse;
+    resample_gfloat_cubic_1 = resample_gfloat_cubic_1_sse;
+
+    resample_gdouble_full_1 = resample_gdouble_full_1_sse2;
+    resample_gdouble_linear_1 = resample_gdouble_linear_1_sse2;
+    resample_gdouble_cubic_1 = resample_gdouble_cubic_1_sse2;
+
+    interpolate_gfloat_linear = interpolate_gfloat_linear_sse;
+    interpolate_gfloat_cubic = interpolate_gfloat_cubic_sse;
+
+    interpolate_gdouble_linear = interpolate_gdouble_linear_sse2;
+    interpolate_gdouble_cubic = interpolate_gdouble_cubic_sse2;
+#else
+    GST_INFO ("SSE2 optimisations not enabled");
+#endif
+  }
+  if (cpuid_sse4_1) {
+#ifdef HAVE_SSE41
+    GST_INFO ("enable SSE41 optimisations");
+    resample_gint32_full_1 = resample_gint32_full_1_sse41;
+    resample_gint32_linear_1 = resample_gint32_linear_1_sse41;
+    resample_gint32_cubic_1 = resample_gint32_cubic_1_sse41;
+#else
+    GST_INFO ("SSE41 optimisations not enabled");
+#endif
+  }
+}

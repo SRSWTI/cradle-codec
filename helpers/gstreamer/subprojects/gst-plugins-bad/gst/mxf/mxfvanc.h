@@ -1,0 +1,42 @@
+/* GStreamer
+ * Copyright (C) 2020 Sebastian Dröge <sebastian@centricular.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Library General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Library General Public License for more details.
+ *
+ * You should have received a copy of the GNU Library General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+ * Boston, MA 02110-1301, USA.
+ */
+
+/* Implementation of SMPTE 436M - MXF Mappings for VBI Lines
+ * and Ancillary Data Packets
+ */
+
+#ifndef __MXF_VANC_H__
+#define __MXF_VANC_H__
+
+#include <gst/gst.h>
+
+typedef struct {
+  guint8 c_not_y_channel_flag;
+  guint8 did;
+  guint8 sdid;
+  guint16 line_number;
+  guint16 horizontal_offset;
+  guint8 data_count;
+  guint16 checksum;
+  guint len_bytes; /* Total length in bytes */
+} St2038AncHeader;
+
+void mxf_vanc_init (void);
+
+#endif /* __MXF_VANC_H__ */

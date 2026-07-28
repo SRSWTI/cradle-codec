@@ -1,0 +1,123 @@
+/*
+ * GStreamer
+ * Copyright (C) 2023 Igalia, S.L.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Library General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Library General Public License for more details.
+ *
+ * You should have received a copy of the GNU Library General Public
+ * License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+ * Boston, MA 02110-1301, USA.
+ */
+
+#pragma once
+
+#include <gst/gst.h>
+#include <gst/vulkan/gstvkapi.h>
+#include "gstvkvideoutils-private.h"
+
+G_BEGIN_DECLS
+
+#define VK_CODEC_VER_MAJ(ver) (ver >> 22)
+#define VK_CODEC_VER_MIN(ver) ((ver >> 12) & ((1 << 10) - 1))
+#define VK_CODEC_VER_REV(ver) (ver & ((1 << 12) - 1))
+#define VK_CODEC_VERSION(ver) VK_CODEC_VER_MAJ (ver), VK_CODEC_VER_MIN (ver), VK_CODEC_VER_REV (ver)
+
+typedef struct _GstVulkanVideoFunctions GstVulkanVideoFunctions;
+typedef struct _GstVulkanVideoSession GstVulkanVideoSession;
+
+struct _GstVulkanVideoSession
+{
+  GstVulkanHandle *session;
+  GstMemory **video_mems;
+  guint n_mems;
+};
+
+typedef enum {
+  GST_VK_VIDEO_EXTENSION_DECODE_H264,
+  GST_VK_VIDEO_EXTENSION_DECODE_H265,
+  GST_VK_VIDEO_EXTENSION_DECODE_VP9,
+  GST_VK_VIDEO_EXTENSION_DECODE_AV1,
+  GST_VK_VIDEO_EXTENSION_ENCODE_H264,
+  GST_VK_VIDEO_EXTENSION_ENCODE_H265,
+  GST_VK_VIDEO_EXTENSION_ENCODE_AV1,
+  GST_VK_VIDEO_EXTENSION_MAX,
+} GST_VK_VIDEO_EXTENSIONS;
+
+#define GST_VULKAN_DEVICE_VIDEO_FN_LIST_COMMON(V)       \
+  V(CreateVideoSession)                                 \
+  V(DestroyVideoSession)                                \
+  V(GetVideoSessionMemoryRequirements)                  \
+  V(DestroyVideoSessionParameters)                      \
+  V(UpdateVideoSessionParameters)                       \
+  V(CreateVideoSessionParameters)                       \
+  V(BindVideoSessionMemory)                             \
+  V(CmdBeginVideoCoding)                                \
+  V(CmdControlVideoCoding)                              \
+  V(CmdEndVideoCoding)
+
+#define GST_VULKAN_DEVICE_VIDEO_FN_LIST_DECODE(V)       \
+  V(CmdDecodeVideo)
+
+#define GST_VULKAN_DEVICE_VIDEO_FN_LIST_ENCODE(V)       \
+  V(CmdEncodeVideo)                                     \
+  V(GetEncodedVideoSessionParameters)
+
+#define GST_VULKAN_INSTANCE_VIDEO_FN_LIST_ENCODE(V)            \
+  V(GetPhysicalDeviceVideoEncodeQualityLevelProperties)
+
+struct _GstVulkanVideoFunctions
+{
+#define DEFINE_FUNCTION(name) G_PASTE(G_PASTE(PFN_vk, name), KHR) name;
+    GST_VULKAN_DEVICE_VIDEO_FN_LIST_COMMON (DEFINE_FUNCTION)
+    GST_VULKAN_DEVICE_VIDEO_FN_LIST_DECODE (DEFINE_FUNCTION)
+    GST_VULKAN_DEVICE_VIDEO_FN_LIST_ENCODE (DEFINE_FUNCTION)
+    GST_VULKAN_INSTANCE_VIDEO_FN_LIST_ENCODE (DEFINE_FUNCTION)
+#undef DEFINE_FUNCTION
+};
+
+#define GST_VULKAN_VIDEO_CODEC_OPERATION_IS_DECODE(codec) ((codec & 0x0000ffff) == codec)
+#define GST_VULKAN_VIDEO_CODEC_OPERATION_IS_ENCODE(codec) ((codec & 0xffff0000) == codec)
+
+extern const VkExtensionProperties _vk_codec_extensions[GST_VK_VIDEO_EXTENSION_MAX];
+extern const VkComponentMapping _vk_identity_component_map;
+
+gboolean                gst_vulkan_video_get_vk_functions       (GstVulkanDevice * device,
+                                                                 GstVulkanVideoFunctions * vk_funcs,
+                                                                 VkVideoCodecOperationFlagBitsKHR codec_op);
+
+gboolean                gst_vulkan_video_session_create         (GstVulkanVideoSession * session,
+                                                                 GstVulkanDevice * device,
+                                                                 GstVulkanVideoFunctions * vk,
+                                                                 VkVideoSessionCreateInfoKHR * session_create,
+                                                                 GError ** error);
+
+void                    gst_vulkan_video_session_destroy        (GstVulkanVideoSession * session);
+
+GstBuffer *             gst_vulkan_video_codec_buffer_new       (GstVulkanDevice * device,
+                                                                 const GstVulkanVideoProfile *profile,
+                                                                 VkBufferUsageFlags usage,
+                                                                 gsize size);
+
+GstVulkanImageView *    gst_vulkan_video_image_create_view     (GstBuffer * buf,
+                                                                gboolean layered_dpb,
+                                                                gboolean is_out,
+                                                                GstVulkanHandle * sampler);
+
+GST_VULKAN_API
+gboolean                gst_vulkan_video_try_configuration     (GstVulkanPhysicalDevice * device,
+                                                                GstVulkanVideoProfile * profile,
+                                                                GstVulkanVideoCapabilities * out_vkcaps,
+                                                                GstCaps ** out_caps,
+                                                                GArray ** out_formats,
+                                                                GError ** error);
+
+G_END_DECLS
