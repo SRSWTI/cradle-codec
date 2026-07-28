@@ -73,16 +73,13 @@ def _max_abs_error(expected: np.ndarray | None, actual: np.ndarray) -> float | N
     return float(np.max(difference))
 
 
-def _decode_restore_artifact(artifact_dir: Path, *, variant_name: str | None) -> tuple[np.ndarray, int, float, float, float]:
+def _decode_restore_artifact(artifact_dir: Path, *, variant_name: str | None) -> tuple[np.ndarray, int, float, float]:
     manifest = read_manifest(artifact_dir / "manifest.json")
     batches = []
-    transfer_ms = 0.0
     decode_ms = 0.0
     network_bytes = 0
     for part in select_manifest_parts(manifest, variant_name=variant_name):
-        transfer_start = perf_counter()
         data = verify_part_payload(artifact_dir, part)
-        transfer_ms += _elapsed_ms(transfer_start)
         network_bytes += part.payload_bytes
 
         decode_start = perf_counter()
@@ -95,7 +92,7 @@ def _decode_restore_artifact(artifact_dir: Path, *, variant_name: str | None) ->
     restore_start = perf_counter()
     restored = unpack_frame_batches_to_kv(batches, layout, num_tokens=manifest.kv_shape.num_tokens)
     restore_ms = _elapsed_ms(restore_start)
-    return restored, network_bytes, transfer_ms, decode_ms, restore_ms
+    return restored, network_bytes, decode_ms, restore_ms
 
 
 def benchmark_artifact_reuse(
@@ -141,7 +138,7 @@ def benchmark_artifact_reuse(
     if selected_variant is None:
         selected_variant = select_variant(manifest, bandwidth_bytes_per_sec=bandwidth).variant.name
 
-    restored, codec_bytes, _disk_transfer_ms, decode_ms, restore_ms = _decode_restore_artifact(artifact_dir, variant_name=selected_variant)
+    restored, codec_bytes, decode_ms, restore_ms = _decode_restore_artifact(artifact_dir, variant_name=selected_variant)
     max_abs_error = _max_abs_error(expected_kv, restored)
     encoded_to_raw = codec_bytes / raw_bytes if raw_bytes else 0.0
     raw_to_encoded = raw_bytes / codec_bytes if codec_bytes else float("inf")
