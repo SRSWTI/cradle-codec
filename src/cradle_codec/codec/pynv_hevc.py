@@ -218,7 +218,7 @@ class PyNvVideoCodecHEVCCodec:
             )
             chunks: list[bytes] = []
             for frame in planes:
-                packet = bytes(encoder.Encode(np.ascontiguousarray(frame)))
+                packet = bytes(encoder.Encode(frame))
                 if packet:
                     chunks.append(packet)
             tail = bytes(encoder.EndEncode())
