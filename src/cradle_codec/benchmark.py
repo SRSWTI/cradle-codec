@@ -68,7 +68,9 @@ def _max_abs_error(expected: np.ndarray | None, actual: np.ndarray) -> float | N
         return None
     if expected.shape != actual.shape:
         raise ValueError(f"expected KV shape {expected.shape} does not match restored shape {actual.shape}")
-    return float(np.max(np.abs(expected.astype(np.float32) - actual.astype(np.float32))))
+    difference = np.subtract(expected, actual, dtype=np.float32)
+    np.abs(difference, out=difference)
+    return float(np.max(difference))
 
 
 def _decode_restore_artifact(artifact_dir: Path, *, variant_name: str | None) -> tuple[np.ndarray, int, float, float, float]:
