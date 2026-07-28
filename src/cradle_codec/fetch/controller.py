@@ -147,11 +147,7 @@ class LocalFetchDecodeController:
 
 
 def available_variant_names(manifest: ArtifactManifest) -> tuple[str, ...]:
-    if hasattr(manifest, "variants_with_base"):
-        return tuple(variant.name for variant in manifest.variants_with_base())
-    names = ["base"]
-    names.extend(str(variant.name) for variant in getattr(manifest, "variants", ()))
-    return tuple(dict.fromkeys(names))
+    return tuple(variant.name for variant in manifest.variants_with_base())
 
 
 def variant_payload_bytes(manifest: ArtifactManifest, variant_name: str | None = None) -> int:
